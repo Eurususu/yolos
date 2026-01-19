@@ -13,7 +13,7 @@ from ultralytics.nn.modules.head import Detect
 def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='', help='weights path')
-    parser.add_argument('--v10', action='store_true', help='whether the model is yolov10')
+    parser.add_argument('--end2end_model', action='store_true', help='whether the model is end2end')
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--topk_all', type=int, default=100, help='max number of detections per image')
     parser.add_argument('--iou_thres', type=float, default=0.7, help='iou threshold for NMS')
@@ -32,8 +32,8 @@ def run_export(opt):
     device = torch.device(opt.device)
     LOGGER.info("Loading model...")
     # model = load_checkpoint(opt.weights,ultralytics=opt.ultralytics, map_location=device)
-    if opt.end2end and opt.v10:
-        raise NotImplementedError("End2End export for YOLOv10 is not supported.")
+    if opt.end2end and opt.end2end_model:
+        raise NotImplementedError("End2End export for end2end model is not supported.")
     model = YOLO(opt.model).model
     for m in model.modules():
         if isinstance(m, Detect):

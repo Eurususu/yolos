@@ -259,7 +259,7 @@ class BaseEngine(object):
             # 截取有效框
             valid_count = int(num[0])
             dets = np.concatenate([np.array(final_boxes)[:valid_count], np.array(final_scores)[:valid_count], np.array(final_cls_inds)[:valid_count]], axis=-1)
-        elif args.v10:
+        elif args.end2end_model:
             if isinstance(data, list):
                 data = data[0]
             pred = data[0] if data.ndim == 3 else data

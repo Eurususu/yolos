@@ -20,12 +20,12 @@ if __name__ == '__main__':
     parser.add_argument("--conf", type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--ultralytics', default=False, action="store_true",
                         help='whether the model is from ultralytics, only for not end2end model')
-    parser.add_argument('--v10', action="store_true", help='whether the model is yolov10')
+    parser.add_argument('--end2end_model', action="store_true", help='whether the model is end2end')
 
     args = parser.parse_args()
     print(args)
-    if args.end2end and args.v10:
-        raise NotImplementedError("YOLOv10 is already End2End.")
+    if args.end2end and args.end2end_model:
+        raise NotImplementedError("end2end model is already End2End.")
     pred = Predictor(engine_path=args.engine)
     pred.get_fps()
     img_path = args.image

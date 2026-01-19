@@ -22,10 +22,8 @@ yolo11n 的静态batch加end2end导出\
 yolo11n 的静态导出无end2end\
 `python export.py --model weights/yolo11n.pt --imgsz 736 1280 --simplify`
 ###
-**除了yolov10其他版本的导出并无差异**
-###
-yolov10 的动态batch加end2end导出\
-`python export.py --model weights/yolov10s.pt --imgsz 736 1280 --dynamic_batch --simplify --v10`
+端到端模型 的动态batch加end2end导出\
+`python export.py --model weights/yolov10s.pt --imgsz 736 1280 --dynamic_batch --simplify --end2end_model`
 ###
 yolo seg模型导出\
 `python export.py --model weights/yolo11s-seg.pt --imgsz 736 1280 --dynamic_batch --end2end --simplify --seg`
@@ -34,11 +32,11 @@ yolo11n.pt推理\
 `python torch_infer.py --weights weights/yolo11n.pt --source data/1.jpg --img_size 736 1280 --half --save`
 
 ### onnx infer
-除yolov10外 onnxruntime end2end模型推理(INMSLayer)\
+非端到端模型 onnxruntime end2end模型推理(INMSLayer)\
 `python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --end2end --save`
 ###
-yolov10 onnxruntime 模型推理\
-`python ort_infer.py --model weights/yolov10s.onnx --source data/1.jpg --v10 --save`
+端到端模型 onnxruntime 模型推理\
+`python ort_infer.py --model weights/yolov10s.onnx --source data/1.jpg --end2end_model --save`
 ###
 ultralytics模型 非end2end onnxruntime 推理\
 `python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --ultralytics --save`
@@ -56,8 +54,8 @@ yolo11n.engine end2end模型推理\
 yolo11n.engine 非end2end模型推理\
 `python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output result.jpg --ultralytics`
 ###
-yolov10s.engine 模型推理\
-`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output result.jpg --v10`
+yolov10s.engine 端到端模型推理\
+`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output result.jpg --end2end_model`
 ###
 其他非ultralytics efficient_nms end2end模型推理\
 `python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output result.jpg --efficient_end2end`

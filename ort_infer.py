@@ -169,7 +169,7 @@ class YOLO_ONNX_Runner:
             det_boxes = outputs[:,1:5]
             det_scores = outputs[:, 5]
             det_classes = outputs[:, 6]
-        elif args.v10:
+        elif args.end2end_model:
             if isinstance(outputs, list): outputs = outputs[0]
             outputs = outputs[0]
             scores = outputs[:, 4]
@@ -321,12 +321,12 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default='weights/yolo11n.onnx', help="Path to ONNX model")
     parser.add_argument("--source", type=str, default='data/1.jpg', help="Path to input image, video file, or RTSP stream")
     parser.add_argument("--end2end", action="store_true", help="Whether to use end2end model")
-    parser.add_argument("--v10", action="store_true", help="Whether to use YOLOv10 model")
-    parser.add_argument("--ultralytics", action="store_true", help="Whether to use Ultralytics model include yolov5u,yolov8,yolov10,yolo11,yolov12,yolov13")
+    parser.add_argument("--end2end_model", action="store_true", help="Whether to use end2end model")
+    parser.add_argument("--ultralytics", action="store_true", help="Whether to use Ultralytics model include yolov5u,yolov8,yolov10,yolo11,yolov12,yolo26")
     parser.add_argument("--no_show", action="store_true", help="Don't display window (useful for server/headless)")
     parser.add_argument("--save", action="store_true", help="Save output to file")
     args = parser.parse_args()
-    if args.end2end and args.v10:
-        raise NotImplementedError("YOLOv10 is already End2End.")
+    if args.end2end and args.end2end_model:
+        raise NotImplementedError("end2end model is already End2End.")
     runner = YOLO_ONNX_Runner(args.model)
     runner.run(args)

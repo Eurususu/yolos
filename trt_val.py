@@ -68,7 +68,7 @@ class Validator(BaseEngine):
             # 截取有效框
             valid_count = int(num[0])
             dets = np.concatenate([np.array(final_boxes)[:valid_count], np.array(final_scores)[:valid_count], np.array(final_cls_inds)[:valid_count]], axis=-1)
-        elif args.v10:
+        elif args.end2end_model:
             if isinstance(data, list):
                 data = data[0]
             pred = data[0] if data.ndim == 3 else data
@@ -177,7 +177,7 @@ def parse_args():
     parser.add_argument("--conf", type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--ultralytics', default=False, action="store_true",
                         help='whether the model is from ultralytics, only for not end2end model')
-    parser.add_argument('--v10', action="store_true", help='whether the model is yolov10')
+    parser.add_argument('--end2end_model', action="store_true", help='whether the model is end2end')
     args = parser.parse_args()
     return args
 

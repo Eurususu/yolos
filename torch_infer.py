@@ -19,6 +19,7 @@ def parse_args():
     args_parser.add_argument('--line_width', type=int, default=1, help='bounding box line width')
     args_parser.add_argument('--project', default='runs/detect', help='save results to project/name')
     args_parser.add_argument('--name', default='exp', help='save results to project/name')
+    args_parser.add_argument('--visualize', action='store_true', help='visualize features')
     args = args_parser.parse_args()
     return args
 
@@ -42,7 +43,8 @@ def run_infer(args):
         name=args.name,
         line_width=args.line_width,
         show_labels=args.show_labels,
-        show_conf=args.show_conf
+        show_conf=args.show_conf,
+        visualize=args.visualize
     )
     return results
 
