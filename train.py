@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--box', type=float, default=7.5, help='box loss gain')
     parser.add_argument('--cls', type=float, default=0.5, help='class loss gain')
     parser.add_argument('--dfl', type=float, default=1.5, help='dfl loss gain')
-    parser.add_argument('--freeze', default='', help='freeze the first N layers of the model or the layers specified by index')
+    parser.add_argument('--freeze', type=int, nargs='+', help='freeze the first N layers of the model or the layers specified by index')
     parser.add_argument('--profile', action='store_true', help='profile model speed while training')
     parser.add_argument('--resume', action='store_true', help='resume training from last.pt')
     parser.add_argument('--plots', action='store_true', help='save plots of training metrics')
