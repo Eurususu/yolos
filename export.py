@@ -17,7 +17,7 @@ def parse_opt():
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--topk_all', type=int, default=100, help='max number of detections per image')
     parser.add_argument('--iou_thres', type=float, default=0.7, help='iou threshold for NMS')
-    parser.add_argument('--conf_thres', type=float, default=0.45, help='confidence threshold for NMS')
+    parser.add_argument('--conf_thres', type=float, default=0.25, help='confidence threshold for NMS')
     parser.add_argument('--dynamic_batch', action='store_true', help='whether to export dynamic batch size')
     parser.add_argument('--end2end', action='store_true', help='whether to export end2end model')
     parser.add_argument('--imgsz', type=int, nargs='+', default=[640,640], help='height and width of the input image')
