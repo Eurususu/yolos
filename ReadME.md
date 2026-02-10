@@ -100,3 +100,9 @@ fp8\
 `trtexec --onnx=yolo11s_fp8_dy_320.onnx --saveEngine=quant.engine --fp8 --fp16 --stronglyTyped --minShapes=images:1x3x320x320 --optShapes=images:1x3x320x320 --maxShapes=images:1x3x320x320`\
 fp16\
 `trtexec --onnx=yolo11s_dy_320.onnx --saveEngine=quant.engine --fp16 --minShapes=images:1x3x320x320 --optShapes=images:1x3x320x320 --maxShapes=images:1x3x320x320`
+
+## how to tune
+1. 使用ultralytics的tune工具,不过这个工具不能调batch，imgsz，model这些参数\
+`python tune.py --data xxx --model xxx --epochs xxx --iterations xxx --batch xxx --imgsz xxx`
+2. 使用原生optuna进行超参数搜索\
+`python tune_optuna.py --data xxx --epochs xxx --trials xxx`
