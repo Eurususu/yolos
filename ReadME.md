@@ -106,3 +106,7 @@ fp16\
 `python tune.py --data xxx --model xxx --epochs xxx --iterations xxx --batch xxx --imgsz xxx`
 2. 使用原生optuna进行超参数搜索\
 `python tune_optuna.py --data xxx --epochs xxx --trials xxx`
+
+## run ort infer with cpp
+下载https://github.com/microsoft/onnxruntime/releases 解压到根目录下面\
+`./run_ort.sh`

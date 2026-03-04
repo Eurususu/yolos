@@ -1,5 +1,6 @@
 weights/
 whls/
+onnxruntime-linux-x64-gpu-1.24.2/
 
 # Python-generated files
 __pycache__/

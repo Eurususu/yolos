@@ -53,6 +53,7 @@ class YOLO_ONNX_Runner:
         image_padded[dh:dh+new_h, dw:dw+new_w, :] = image_resized
         
         # 2. 归一化 & 转换
+        image_padded = cv2.cvtColor(image_padded, cv2.COLOR_BGR2RGB)
         image_data = image_padded.transpose(2, 0, 1) # HWC -> CHW
         image_data = np.expand_dims(image_data, axis=0) # Add Batch Dim
         image_data = image_data.astype(np.float32) / 255.0 # 0-255 -> 0.0-1.0
