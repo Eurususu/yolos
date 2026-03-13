@@ -165,10 +165,8 @@ class BaseEngine(object):
                     final_cls_inds = valid_predictions[:, 6].astype(int)
                     if dwdh is not None:
                         dw, dh = dwdh
-                    final_boxes[:, 0] -= dw
-                    final_boxes[:, 1] -= dh
-                    final_boxes[:, 2] -= dw
-                    final_boxes[:, 3] -= dh
+                    final_boxes[:, 0,2] -= dw
+                    final_boxes[:, 1,3] -= dh
                     final_boxes /= ratio
                     final_scores = np.reshape(final_scores, (-1, 1))
                     final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -180,16 +178,28 @@ class BaseEngine(object):
                 # 还原坐标：先减 padding，再除以 ratio
                 if dwdh is not None:
                     dw, dh = dwdh
-                    final_boxes[:, 0] -= dw
-                    final_boxes[:, 1] -= dh
-                    final_boxes[:, 2] -= dw
-                    final_boxes[:, 3] -= dh
+                    final_boxes[:, 0,2] -= dw
+                    final_boxes[:, 1,3] -= dh
                 final_boxes /= ratio
                 final_scores = np.reshape(final_scores, (-1, 1))
                 final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
                 # 截取有效框
                 valid_count = int(num[0])
                 dets = np.concatenate([np.array(final_boxes)[:valid_count], np.array(final_scores)[:valid_count], np.array(final_cls_inds)[:valid_count]], axis=-1)
+            elif args.end2end_model:
+                if isinstance(data, list):
+                    data = data[0]
+                data = data[0] if data.ndim == 3 else data
+                mask = data[:, 4] > args.conf
+                valid_predictions = data[mask]
+                if valid_predictions.shape[0] == 0:
+                    print("没有检测到物体")
+                elif dwdh is not None:
+                    dw, dh = dwdh 
+                    valid_predictions[:, 0,2] -= dw
+                    valid_predictions[:, 1,3] -= dh
+                valid_predictions[:,:4] /= ratio
+                dets = valid_predictions
             else:
                 if args.ultralytics:
                     if isinstance(data, list):
@@ -234,10 +244,8 @@ class BaseEngine(object):
                 final_cls_inds = valid_predictions[:, 6].astype(int)
                 if dwdh is not None:
                     dw, dh = dwdh
-                final_boxes[:, 0] -= dw
-                final_boxes[:, 1] -= dh
-                final_boxes[:, 2] -= dw
-                final_boxes[:, 3] -= dh
+                final_boxes[:, 0,2] -= dw
+                final_boxes[:, 1,3] -= dh
                 final_boxes /= ratio
                 final_scores = np.reshape(final_scores, (-1, 1))
                 final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -249,10 +257,8 @@ class BaseEngine(object):
             # 还原坐标：先减 padding，再除以 ratio
             if dwdh is not None:
                 dw, dh = dwdh
-                final_boxes[:, 0] -= dw
-                final_boxes[:, 1] -= dh
-                final_boxes[:, 2] -= dw
-                final_boxes[:, 3] -= dh
+                final_boxes[:, 0,2] -= dw
+                final_boxes[:, 1,3] -= dh
             final_boxes /= ratio
             final_scores = np.reshape(final_scores, (-1, 1))
             final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -262,15 +268,17 @@ class BaseEngine(object):
         elif args.end2end_model:
             if isinstance(data, list):
                 data = data[0]
-            pred = data[0] if data.ndim == 3 else data
-            if dwdh is not None:
+            data = data[0] if data.ndim == 3 else data
+            mask = data[:, 4] > args.conf
+            valid_predictions = data[mask]
+            if valid_predictions.shape[0] == 0:
+                print("没有检测到物体")
+            elif dwdh is not None:
                 dw, dh = dwdh 
-                data[:, 0] -= dw
-                data[:, 1] -= dh
-                data[:, 2] -= dw
-                data[:, 3] -= dh
-            data[:,:4] /= ratio
-            dets = data
+                valid_predictions[:, 0,2] -= dw
+                valid_predictions[:, 1,3] -= dh
+            valid_predictions[:,:4] /= ratio
+            dets = valid_predictions
         else:
             if args.ultralytics:
                 if isinstance(data, list):
@@ -310,7 +318,7 @@ class BaseEngine(object):
             boxes_xyxy[:, 2] -= dw
             boxes_xyxy[:, 3] -= dh
         boxes_xyxy /= ratio
-        dets = multiclass_nms(boxes_xyxy, scores, nms_thr=0.45, score_thr=0.1)
+        dets = multiclass_nms(boxes_xyxy, scores, nms_thr=0.7, score_thr=0.25)
         return dets
 
     def get_fps(self):

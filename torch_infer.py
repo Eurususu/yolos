@@ -7,7 +7,7 @@ def parse_args():
     args_parser.add_argument('--source', type=str, default='data/1.jpg', help='image/video path')
     args_parser.add_argument('--batch', type=int, default=1, help='batch size')
     args_parser.add_argument('--conf', type=float, default=0.25, help='confidence threshold')
-    args_parser.add_argument('--iou', type=float, default=0.45, help='NMS IoU threshold')
+    args_parser.add_argument('--iou', type=float, default=0.7, help='NMS IoU threshold')
     args_parser.add_argument('--max_det', type=int, default=300, help='maximum detections per image')
     args_parser.add_argument('--imgsz', type=int, nargs='+', default=[640,640], help='height and width of the input image')
     args_parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 0 2 3')

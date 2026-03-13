@@ -81,6 +81,8 @@ yolo11n 验证\
 `python utils/yolo2coco.py ----img_dir xxx --label_dir xxx --output xxx --classes xxx`
 2. trt val\
 `python ./trt_val.py --engine /home/jia/3classes_int8_entropy.engine --img_dir /home/jia/project/test_val/images/val --coco_json 3classes.json --end2end --conf 0.001`
+3. trt val coco\
+`python ./trt_val.py --engine quant_e2e.engine --img_dir /home/jia/dataset/coco2017/images/val2017 --coco_json /home/jia/dataset/coco2017/annotations/instances_val2017.json --end2end --conf 0.001 --use_coco_map`
 
 
 ## how to quant
@@ -110,3 +112,9 @@ fp16\
 ## run ort infer with cpp
 下载https://github.com/microsoft/onnxruntime/releases 解压到根目录下面\
 `./run_ort.sh`
+
+## run ort val and fps test
+端到端模型\
+`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --end2end --val --benchmark`
+非端到端模型\
+`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --ultralytics --val --benchmark`

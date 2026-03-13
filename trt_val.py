@@ -43,10 +43,8 @@ class Validator(BaseEngine):
                 final_cls_inds = valid_predictions[:, 6].astype(int)
                 if dwdh is not None:
                     dw, dh = dwdh
-                final_boxes[:, 0] -= dw
-                final_boxes[:, 1] -= dh
-                final_boxes[:, 2] -= dw
-                final_boxes[:, 3] -= dh
+                final_boxes[:, 0,2] -= dw
+                final_boxes[:, 1,3] -= dh
                 final_boxes /= ratio
                 final_scores = np.reshape(final_scores, (-1, 1))
                 final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -58,10 +56,8 @@ class Validator(BaseEngine):
             # 还原坐标：先减 padding，再除以 ratio
             if dwdh is not None:
                 dw, dh = dwdh
-                final_boxes[:, 0] -= dw
-                final_boxes[:, 1] -= dh
-                final_boxes[:, 2] -= dw
-                final_boxes[:, 3] -= dh
+                final_boxes[:, 0,2] -= dw
+                final_boxes[:, 1,3] -= dh
             final_boxes /= ratio
             final_scores = np.reshape(final_scores, (-1, 1))
             final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -71,15 +67,17 @@ class Validator(BaseEngine):
         elif args.end2end_model:
             if isinstance(data, list):
                 data = data[0]
-            pred = data[0] if data.ndim == 3 else data
-            if dwdh is not None:
-                dw, dh = dwdh 
-                data[:, 0] -= dw
-                data[:, 1] -= dh
-                data[:, 2] -= dw
-                data[:, 3] -= dh
-            data[:,:4] /= ratio
-            dets = data
+            data = data[0] if data.ndim == 3 else data
+            mask = data[:, 4] > args.conf
+            valid_predictions = data[mask]
+            if valid_predictions.shape[0] == 0:
+                print("没有检测到物体")
+            elif dwdh is not None:
+                dw, dh = dwdh
+                valid_predictions[:, 0,2] -= dw
+                valid_predictions[:, 1,3] -= dh 
+            valid_predictions[:,:4] /= ratio
+            dets = valid_predictions
         else:
             if args.ultralytics:
                 if isinstance(data, list):
@@ -119,7 +117,7 @@ class Validator(BaseEngine):
                 img_path = os.path.join(args.img_dir, img_info['file_name'])
                 dets = self.inference(img_path, args)
                 if len(dets) == 0:
-                    print(f"No detections for image {img_id}")
+                    # print(f"No detections for image {img_id}")
                     continue
                 boxes, scores, classes = dets[:,:4], dets[:, 4], dets[:, 5]
                 for i in range(len(boxes)):
