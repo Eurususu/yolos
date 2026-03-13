@@ -6,7 +6,9 @@ import numpy as np
 import onnxruntime as ort
 import argparse
 import time
-import matplotlib.pyplot as plt
+import os
+import json
+from tqdm import tqdm
 import logging
 import warnings
 
@@ -18,21 +20,11 @@ warnings.filterwarnings('ignore')
 
 
 class YOLO_ONNX_Runner:
-    def __init__(self, model_path, confidence_thres=0.4, iou_thres=0.7, num_classes=80, device_id=0):
+    def __init__(self, model_path, confidence_thres=0.001, iou_thres=0.7, num_classes=80, device_id=0):
         self.conf_thres = confidence_thres
         self.iou_thres = iou_thres
         self.num_classes = num_classes
         self.device_id = device_id
-
-        self.class_names = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
-         'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
-         'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-         'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
-         'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-         'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-         'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
-         'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
-         'hair drier', 'toothbrush']
 
         # 优先使用 CUDA, 其次 CPU
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
@@ -57,6 +49,13 @@ class YOLO_ONNX_Runner:
         # 缓存输入尺寸
         self.input_height = self.input_shape[2]
         self.input_width = self.input_shape[3]
+
+        # YOLO 0~79 索引到 COCO 真实 Category ID 的映射字典
+        self.coco_id_mapping = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34,
+            35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+            64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90
+        ]
 
     def get_input_details(self):
         model_inputs = self.session.get_inputs()
@@ -147,6 +146,7 @@ class YOLO_ONNX_Runner:
             
         return np.array(final_dets)
 
+
     def infer_single_frame(self, img, args):
         img_data, scale, pad = self.preprocess(img)
 
@@ -205,135 +205,152 @@ class YOLO_ONNX_Runner:
 
         if dets is not None and len(dets) > 0:
             final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
-            img = self.vis(img, final_boxes, final_scores, final_cls_inds,
-                           conf=self.conf_thres, class_names=self.class_names)
-        return img, inference_time
-
-    def run(self, args):
-        source = args.source
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.webp']
-        is_image = any(source.lower().endswith(ext) for ext in image_extensions)
-        if is_image:
-            print(f"正在处理图片: {source}")
-            img = cv2.imread(source)
-            if img is None:
-                print(f"无法读取图片: {source}")
-                return
-
-            result_img, t = self.infer_single_frame(img, args)
-
-            output_path = "result.jpg"
-            if args.save:
-                cv2.imwrite(output_path, result_img)
-            print(f"推理时间: {t:.2f}ms, 结果已保存至: {output_path}")
+            return final_boxes, final_scores, final_cls_inds
         else:
-            print(f"正在尝试打开视频源: {source}")
+            return np.array([]), np.array([]), np.array([])
 
-            if source.isdigit():
-                source = int(source)
 
-            cap = cv2.VideoCapture(source)
-            if not cap.isOpened():
-                print(f"无法打开视频源: {source}")
-                return
+    def benchmark(self, img, batch_size=8, num_warmup=10, num_runs=50):
+        """
+        测试 GPU 在多 Batch 下的吞吐量 (Throughput)
+        """
+        # 检查模型是否支持动态batch
+        model_batch = self.input_shape[0]
+        if isinstance(model_batch, str) or model_batch == 'batch':
+            actual_batch = batch_size
+        elif model_batch == 1:
+            actual_batch = 1
+            print(f"模型仅支持 batch=1，将使用单帧推理测试")
+        else:
+            actual_batch = min(batch_size, model_batch)
 
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps == 0:
-                fps = 25
+        print(f"\n--- 开始 Batch={actual_batch} 性能压测 ---")
 
-            out_writer = None
-            is_file = isinstance(source, str) and os.path.exists(source)
+        # 1. 预处理单张图片
+        single_img_data, scale, pad = self.preprocess(img)
 
-            if is_file and args.save:
-                save_path = "result_video.mp4"
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out_writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
-                print(f"视频处理中，结果将保存至: {save_path}")
-            else:
-                print("正在处理实时流 (按 'q' 退出)...")
+        # 2. 复制拼装成 Batch 大小的 Tensor
+        batch_img_data = np.repeat(single_img_data, actual_batch, axis=0)
 
-            frame_count = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+        # 3. 准备 IOBinding
+        io_binding = self.session.io_binding()
+        ort_input = ort.OrtValue.ortvalue_from_numpy(batch_img_data, "cuda", self.device_id)
+        io_binding.bind_ortvalue_input(self.input_name, ort_input)
+        io_binding.bind_output(self.output_name, "cuda", device_id=self.device_id)
 
-                result_img, t = self.infer_single_frame(frame, args)
+        # 预热
+        print("正在进行 GPU 预热...")
+        for _ in range(num_warmup):
+            self.session.run_with_iobinding(io_binding)
 
-                cv2.putText(result_img, f"FPS: {1000/t:.1f} (Inference: {t:.1f}ms)", (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # 计时
+        print(f"开始正式计时 (共跑 {num_runs} 次)...")
+        start_time = time.perf_counter()
 
-                if out_writer:
-                    out_writer.write(result_img)
+        for _ in range(num_runs):
+            self.session.run_with_iobinding(io_binding)
+            _ = io_binding.get_outputs()
 
-                if not args.no_show:
-                    cv2.imshow("YOLO ONNX Runtime", result_img)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+        end_time = time.perf_counter()
 
-                frame_count += 1
-                if frame_count % 30 == 0:
-                    print(f"已处理 {frame_count} 帧, 当前推理耗时: {t:.2f}ms")
+        # 计算指标
+        total_time_ms = (end_time - start_time) * 1000
+        avg_batch_time_ms = total_time_ms / num_runs
+        fps = (1000.0 / avg_batch_time_ms) * actual_batch
 
-            cap.release()
-            if out_writer:
-                out_writer.release()
-            cv2.destroyAllWindows()
-            if is_file:
-                print("视频处理完成。")
+        print(f"Batch Size: {actual_batch}")
+        print(f"跑完单个 Batch 平均耗时: {avg_batch_time_ms:.2f} ms")
+        print(f"折合单张图片推理耗时: {avg_batch_time_ms / actual_batch:.2f} ms")
+        print(f"【极限吞吐量】: {fps:.2f} FPS (帧/秒)")
+        print("-" * 40)
 
-    @staticmethod
-    def rainbow_fill(size=50):
-        cmap = plt.get_cmap('jet')
-        color_list = []
-        for n in range(size):
-            color = cmap(n / size)
-            color_list.append(color[:3])
-        return np.array(color_list)
 
-    def vis(self, img, boxes, scores, cls_ids, conf=0.5, class_names=None):
-        _COLORS = self.rainbow_fill(80).astype(np.float32).reshape(-1, 3)
-        for i in range(len(boxes)):
-            box = boxes[i]
-            cls_id = int(cls_ids[i])
-            score = scores[i]
-            if score < conf:
+    def validate_coco(self, val_img_dir, val_anno_json, args):
+        """核心评估函数：生成 COCO 格式的 JSON 并调用 pycocotools 评估"""
+        try:
+            from pycocotools.coco import COCO
+            from pycocotools.cocoeval import COCOeval
+        except ImportError:
+            print("请先安装 pycocotools: pip install pycocotools")
+            return
+
+        print(f"正在加载真实标注文件: {val_anno_json} ...")
+        coco_gt = COCO(val_anno_json)
+        img_ids = coco_gt.getImgIds()
+
+        results = []
+        print(f"开始在验证集上推理，共 {len(img_ids)} 张图片...")
+
+        for img_id in tqdm(img_ids):
+            img_info = coco_gt.loadImgs(img_id)[0]
+            img_path = os.path.join(val_img_dir, img_info['file_name'])
+
+            img = cv2.imread(img_path)
+            if img is None:
                 continue
-            x0, y0, x1, y1 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
 
-            color = (_COLORS[cls_id] * 255).astype(np.uint8).tolist()
-            text = f'{class_names[cls_id]}:{score * 100:.1f}%'
-            txt_color = (0, 0, 0) if np.mean(_COLORS[cls_id]) > 0.5 else (255, 255, 255)
-            font = cv2.FONT_HERSHEY_SIMPLEX
+            det_boxes, det_scores, det_classes = self.infer_single_frame(img, args)
 
-            txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
-            cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+            if len(det_boxes) == 0:
+                continue
 
-            txt_bk_color = (_COLORS[cls_id] * 255 * 0.7).astype(np.uint8).tolist()
-            cv2.rectangle(img, (x0, y0 + 1),
-                          (x0 + txt_size[0] + 1, y0 + int(1.5 * txt_size[1])),
-                          txt_bk_color, -1)
-            cv2.putText(img, text, (x0, y0 + txt_size[1]), font, 0.4, txt_color, thickness=1)
+            for box, score, cls_id in zip(det_boxes, det_scores, det_classes):
+                x1, y1, x2, y2 = box
+                w, h = x2 - x1, y2 - y1
+                coco_cat_id = self.coco_id_mapping[int(cls_id)]
 
-        return img
+                results.append({
+                    "image_id": img_id,
+                    "category_id": coco_cat_id,
+                    "bbox": [round(float(x1), 3), round(float(y1), 3), round(float(w), 3), round(float(h), 3)],
+                    "score": round(float(score), 5)
+                })
+
+        # 保存预测结果为 JSON
+        res_json_path = "predictions.json"
+        with open(res_json_path, 'w') as f:
+            json.dump(results, f)
+        print(f"\n预测结果已保存至 {res_json_path}，准备开始计算 mAP...")
+
+        # 调用 pycocotools 进行评估
+        coco_dt = coco_gt.loadRes(res_json_path)
+        coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        coco_eval.summarize()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default='weights/yolo11s.onnx', help="Path to ONNX model")
-    parser.add_argument("--source", type=str, default='data/1.jpg', help="Path to input image, video file, or RTSP stream")
+    parser.add_argument("--source", type=str, default='data/1.jpg', help="Path to input image")
     parser.add_argument("--end2end", action="store_true", help="Whether to use end2end model")
     parser.add_argument("--end2end_model", action="store_true", help="Whether to use end2end model")
     parser.add_argument("--ultralytics", action="store_true", help="Whether to use Ultralytics model")
-    parser.add_argument("--no_show", action="store_true", help="Don't display window")
-    parser.add_argument("--save", action="store_true", help="Save output to file")
-    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+
+    # 验证集专用参数
+    parser.add_argument("--val", action="store_true", help="Run in validation mode to compute mAP")
+    parser.add_argument("--val_dir", type=str, default='/home/jia/dataset/coco2017/images/val2017', help="Path to COCO val images directory")
+    parser.add_argument("--val_json", type=str, default='/home/jia/dataset/coco2017/annotations/instances_val2017.json', help="Path to COCO val annotations json")
+
+    # FPS测试
+    parser.add_argument("--benchmark", action="store_true", help="Run benchmark to measure FPS")
+
     args = parser.parse_args()
 
     if args.end2end and args.end2end_model:
         raise NotImplementedError("end2end model is already End2End.")
 
-    runner = YOLO_ONNX_Runner(args.model, confidence_thres=args.conf)
-    runner.run(args)
+    # 注意：验证模式下，强制降低置信度阈值
+    conf_thres = 0.001 if args.val else 0.4
+    runner = YOLO_ONNX_Runner(args.model, confidence_thres=conf_thres)
+
+    if args.val:
+        runner.validate_coco(args.val_dir, args.val_json, args)
+
+    if args.benchmark:
+        dummy_img = cv2.imread(args.source)
+        if dummy_img is None:
+            dummy_img = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
+
+        runner.benchmark(dummy_img, batch_size=16, num_warmup=50, num_runs=200)

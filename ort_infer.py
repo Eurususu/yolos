@@ -1,10 +1,20 @@
+import os
+os.environ['ORT_LOG_SEVERITY_LEVEL'] = '3'
+
 import cv2
 import numpy as np
 import onnxruntime as ort
 import argparse
 import time
-import os
 import matplotlib.pyplot as plt
+import logging
+import warnings
+
+# 关闭onnxruntime的logging
+logging.getLogger('onnxruntime').setLevel(logging.ERROR)
+
+# 过滤Python警告
+warnings.filterwarnings('ignore')
 
 
 class YOLO_ONNX_Runner:
@@ -27,8 +37,15 @@ class YOLO_ONNX_Runner:
         # 优先使用 CUDA, 其次 CPU
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         provider_options = [{'device_id': self.device_id}, {}]
+
+        # Session配置优化
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = 4
+        sess_options.log_severity_level = 3  # 3=ERROR, 2=WARNING, 1=INFO, 0=VERBOSE
+
         try:
-            self.session = ort.InferenceSession(model_path, providers=providers, provider_options=provider_options)
+            self.session = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers, provider_options=provider_options)
             print(f"模型加载成功，使用设备: {self.session.get_providers()[0]}")
         except Exception as e:
             print(f"模型加载失败: {e}")
@@ -36,6 +53,10 @@ class YOLO_ONNX_Runner:
         
         self.get_input_details()
         self.get_output_details()
+
+        # 缓存输入尺寸（预处理时重复使用）
+        self.input_height = self.input_shape[2]
+        self.input_width = self.input_shape[3]
 
     def get_input_details(self):
         model_inputs = self.session.get_inputs()
@@ -50,10 +71,9 @@ class YOLO_ONNX_Runner:
         print(f"模型输出节点: {self.output_name}, 形状: {self.output_shape}")
 
     def preprocess(self, image_src):
-        self.img_h, self.img_w = image_src.shape[:2]
-        self.input_height, self.input_width = self.input_shape[2], self.input_shape[3]
-        scale = min(self.input_height / self.img_h, self.input_width / self.img_w)
-        new_unpad = int(round(self.img_w * scale)), int(round(self.img_h * scale))
+        img_h, img_w = image_src.shape[:2]
+        scale = min(self.input_height / img_h, self.input_width / img_w)
+        new_unpad = int(round(img_w * scale)), int(round(img_h * scale))
         dw, dh = self.input_width - new_unpad[0], self.input_height - new_unpad[1]
         dw /= 2
         dh /= 2
@@ -78,7 +98,7 @@ class YOLO_ONNX_Runner:
         return im, scale, (dw, dh)
 
     @staticmethod
-    def postprocess(predictions, ratio, dwdh=None, ultralytics=False):
+    def postprocess(predictions, ratio, dwdh=None, ultralytics=False, conf_thres=0.25, iou_thres=0.7):
         boxes = predictions[:, :4]
         if ultralytics:
             scores = predictions[:, 4:]
@@ -97,7 +117,7 @@ class YOLO_ONNX_Runner:
             boxes_xyxy[:, 2] -= dw
             boxes_xyxy[:, 3] -= dh
         boxes_xyxy /= ratio
-        dets = YOLO_ONNX_Runner.multiclass_nms(boxes_xyxy, scores, nms_thr=0.7, score_thr=0.25)
+        dets = YOLO_ONNX_Runner.multiclass_nms(boxes_xyxy, scores, nms_thr=iou_thres, score_thr=conf_thres)
         return dets
     
 
@@ -160,64 +180,64 @@ class YOLO_ONNX_Runner:
     def infer_single_frame(self, img, args):
         img_data, scale, pad = self.preprocess(img)
 
+        # IO binding 推理
         io_binding = self.session.io_binding()
         ort_input = ort.OrtValue.ortvalue_from_numpy(img_data, "cuda", self.device_id)
         io_binding.bind_ortvalue_input(self.input_name, ort_input)
         io_binding.bind_output(self.output_name, "cuda", device_id=self.device_id)
+
         start_time = time.time()
         self.session.run_with_iobinding(io_binding)
         data = [out.numpy() for out in io_binding.get_outputs()]
-        end_time = time.time()
-        inference_time = (end_time - start_time) * 1000
+        inference_time = (time.time() - start_time) * 1000
+
+        # 统一解包 list
+        data = data[0]
 
         if args.end2end:
-            if isinstance(data, list):
-                data = data[0]
             mask = data[:, 5] > self.conf_thres
             valid_predictions = data[mask]
             if valid_predictions.shape[0] == 0:
                 print("没有检测到物体")
+                dets = None
             else:
+                dw, dh = pad
                 final_boxes = valid_predictions[:, 1:5]
-                final_scores = valid_predictions[:, 5]
-                final_cls_inds = valid_predictions[:, 6].astype(int)
-                if pad is not None:
-                    dw, dh = pad
                 final_boxes[:, [0,2]] -= dw
                 final_boxes[:, [1,3]] -= dh
                 final_boxes /= scale
-                final_scores = np.reshape(final_scores, (-1, 1))
-                final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
-                dets = np.concatenate([np.array(final_boxes), np.array(final_scores), np.array(final_cls_inds)], axis=-1)
+                final_scores = valid_predictions[:, 5:6]
+                final_cls_inds = valid_predictions[:, 6:7].astype(int)
+                dets = np.concatenate([final_boxes, final_scores, final_cls_inds], axis=-1)
+
         elif args.end2end_model:
-            if isinstance(data, list):
-                data = data[0]
             data = data[0] if data.ndim == 3 else data
-            mask = data[:, 4] > args.conf
+            mask = data[:, 4] > self.conf_thres
             valid_predictions = data[mask]
             if valid_predictions.shape[0] == 0:
                 print("没有检测到物体")
-            elif pad is not None:
-                dw, dh = pad 
-                valid_predictions[:, [0,2]] -= dw
-                valid_predictions[:, [1,3]] -= dh
-            valid_predictions[:,:4] /= scale
-            dets = valid_predictions
+                dets = None
+            else:
+                if pad is not None:
+                    dw, dh = pad
+                    valid_predictions[:, [0,2]] -= dw
+                    valid_predictions[:, [1,3]] -= dh
+                valid_predictions[:, :4] /= scale
+                dets = valid_predictions
+
         else:
             if args.ultralytics:
-                if isinstance(data, list):
-                    data = data[0]
-                predictions = data
-                if predictions.ndim == 3:
-                     predictions = predictions[0]
+                predictions = data[0] if data.ndim == 3 else data
                 predictions = predictions.transpose()
             else:
-                predictions = np.reshape(data, (1, -1, int(5+self.n_classes)))[0]
-            dets = self.postprocess(predictions,scale,pad,ultralytics=args.ultralytics)
+                predictions = data.reshape(1, -1, 5 + self.num_classes)[0]
+            dets = self.postprocess(predictions, scale, pad,
+                                    ultralytics=args.ultralytics,
+                                    conf_thres=self.conf_thres,
+                                    iou_thres=self.iou_thres)
 
         if dets is not None and len(dets) > 0:
-            final_boxes, final_scores, final_cls_inds = dets[:,
-                                                             :4], dets[:, 4], dets[:, 5]
+            final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
             img = YOLO_ONNX_Runner.vis(img, final_boxes, final_scores, final_cls_inds,
                              conf=self.conf_thres, class_names=self.class_names)
         return img, inference_time

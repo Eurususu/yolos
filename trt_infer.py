@@ -1,38 +1,51 @@
+import argparse
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 from utils.trtEngine import BaseEngine
 import cv2
-import argparse
+
 
 class Predictor(BaseEngine):
-    def __init__(self, engine_path):
-        super(Predictor, self).__init__(engine_path)
-        self.n_classes = 80  # your model classes
+    def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.7):
+        super(Predictor, self).__init__(engine_path, conf_thres=conf_thres, iou_thres=iou_thres)
+        self.n_classes = 80
+        self.class_names = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+         'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+         'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+         'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+         'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+         'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+         'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+         'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+         'hair drier', 'toothbrush']
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--engine", help="TRT engine Path")
     parser.add_argument("-i", "--image", help="image path")
     parser.add_argument("-o", "--output", help="image output path")
-    parser.add_argument("-v", "--video",  help="video path or camera index ")
-    parser.add_argument("--end2end", default=False, action="store_true",
-                        help="use end2end engine")
-    parser.add_argument("--efficient_end2end", default=False, action="store_true", 
-                        help='use efficient_end2end engine')
+    parser.add_argument("-v", "--video", help="video path or camera index")
+    parser.add_argument("--end2end", default=False, action="store_true", help="use end2end engine")
+    parser.add_argument("--efficient_end2end", default=False, action="store_true", help='use efficient_end2end engine')
     parser.add_argument("--conf", type=float, default=0.25, help='object confidence threshold')
-    parser.add_argument('--ultralytics', default=False, action="store_true",
-                        help='whether the model is from ultralytics, only for not end2end model')
+    parser.add_argument("--iou", type=float, default=0.7, help='NMS IoU threshold')
+    parser.add_argument('--ultralytics', default=False, action="store_true", help='whether the model is from ultralytics')
     parser.add_argument('--end2end_model', action="store_true", help='whether the model is end2end')
 
     args = parser.parse_args()
     print(args)
+
     if args.end2end and args.end2end_model:
         raise NotImplementedError("end2end model is already End2End.")
-    pred = Predictor(engine_path=args.engine)
-    pred.get_fps()
-    img_path = args.image
-    video = args.video
-    if img_path:
-      origin_img = pred.inference(img_path, args)
 
-      cv2.imwrite("%s" %args.output , origin_img)
-    if video:
-      pred.detect_video(video, args) # set 0 use a webcam
+    pred = Predictor(engine_path=args.engine, conf_thres=args.conf, iou_thres=args.iou)
+    pred.get_fps()
+
+    if args.image:
+        origin_img = pred.inference(args.image, args)
+        cv2.imwrite(args.output or "result.jpg", origin_img)
+
+    if args.video:
+        pred.detect_video(args.video, args)
