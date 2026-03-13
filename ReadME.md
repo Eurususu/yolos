@@ -114,7 +114,7 @@ fp16\
 `./run_ort.sh`
 
 ## run ort val and fps test
-端到端模型\
+1. 端到端模型\
 `python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --end2end --val --benchmark`
-非端到端模型\
+2. 非端到端模型\
 `python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --ultralytics --val --benchmark`

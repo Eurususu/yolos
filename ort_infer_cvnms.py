@@ -4,7 +4,6 @@ import onnxruntime as ort
 import argparse
 import time
 import os
-import matplotlib.pyplot as plt
 
 
 class YOLO_ONNX_Runner:

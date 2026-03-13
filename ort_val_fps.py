@@ -282,8 +282,8 @@ class YOLO_ONNX_Runner:
                 final_cls_inds = valid_predictions[:, 6].astype(int)
                 if pad is not None:
                     dw, dh = pad
-                final_boxes[:, 0,2] -= dw
-                final_boxes[:, 1,3] -= dh
+                final_boxes[:, [0,2]] -= dw
+                final_boxes[:, [1,3]] -= dh
                 final_boxes /= scale
                 final_scores = np.reshape(final_scores, (-1, 1))
                 final_cls_inds = np.reshape(final_cls_inds, (-1, 1))
@@ -298,8 +298,8 @@ class YOLO_ONNX_Runner:
                 print("没有检测到物体")
             elif pad is not None:
                 dw, dh = pad 
-                valid_predictions[:, 0,2] -= dw
-                valid_predictions[:, 1,3] -= dh
+                valid_predictions[:, [0,2]] -= dw
+                valid_predictions[:, [1,3]] -= dh
             valid_predictions[:,:4] /= scale
             dets = valid_predictions
         else:
