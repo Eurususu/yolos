@@ -3,24 +3,44 @@
 #include <string>
 #include <chrono>
 #include <algorithm>
-#include <filesystem>  // 用于检查文件是否存在 (C++17)
-#include <iomanip>     // 用于控制浮点数输出格式
-#include <sstream>
+#include <thread>
+#include <filesystem>
+#include <cstdio>
 #include <opencv2/opencv.hpp>
 #include <onnxruntime_cxx_api.h>
 
 // 模拟 Python 的 argparse 参数结构
 struct Args {
-    std::string model = "weights/yolo11n.onnx";
+    std::string model = "weights/yolov7-tiny.onnx";
     std::string source = "data/1.jpg";
+    float conf_thres = 0.45f;
+    float iou_thres = 0.7f;
+    int num_classes = 80;
     bool end2end = false;
     bool end2end_model = false;
-    bool ultralytics = true; 
+    bool ultralytics = false;
     bool no_show = false;
-    bool save = false;
+    bool save = true;
 };
 
+// COCO 类别名称列表
+static const std::vector<std::string> COCO_NAMES = {
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush"
+};
+
+// 图片扩展名列表
+static const std::vector<std::string> IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"};
+
 class YoloOnnxRunner {
+
 private:
     float conf_thres;
     float iou_thres;
@@ -30,6 +50,7 @@ private:
     Ort::SessionOptions session_options;
     std::unique_ptr<Ort::Session> session;
     Ort::AllocatorWithDefaultOptions allocator;
+    Ort::MemoryInfo memory_info;
 
     std::vector<const char*> input_names;
     std::vector<const char*> output_names;
@@ -47,9 +68,11 @@ private:
 
 public:
     YoloOnnxRunner(const std::string& model_path, float confidence_thres = 0.4f, float iou_thres = 0.7f, int num_classes = 80)
-        : conf_thres(confidence_thres), iou_thres(iou_thres), num_classes(num_classes), env(ORT_LOGGING_LEVEL_WARNING, "YOLO_ONNX") {
-        
-        session_options.SetIntraOpNumThreads(1);
+        : conf_thres(confidence_thres), iou_thres(iou_thres), num_classes(num_classes),
+          env(ORT_LOGGING_LEVEL_WARNING, "YOLO_ONNX"),
+          memory_info(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
+
+        session_options.SetIntraOpNumThreads(std::thread::hardware_concurrency());
         session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
         // 尝试启用 CUDA
@@ -113,51 +136,71 @@ public:
         }
     }
 
-    // 预处理
+    // 预处理 - 简化版本，减少中间Mat创建
     std::vector<float> preprocess(const cv::Mat& image_src, float& scale, int& dw, int& dh) {
         img_h = image_src.rows;
         img_w = image_src.cols;
 
-        // 1. Letterbox Resize
+        // Letterbox Resize
         scale = std::min((float)input_height / img_h, (float)input_width / img_w);
-        int new_h = std::round(img_h * scale);
-        int new_w = std::round(img_w * scale);
+        int new_w = static_cast<int>(std::round(img_w * scale));
+        int new_h = static_cast<int>(std::round(img_h * scale));
 
-        cv::Mat image_resized;
-        cv::resize(image_src, image_resized, cv::Size(new_w, new_h));
-
-        cv::Mat image_padded(input_height, input_width, CV_8UC3, cv::Scalar(114, 114, 114));
         dw = (input_width - new_w) / 2;
         dh = (input_height - new_h) / 2;
-        image_resized.copyTo(image_padded(cv::Rect(dw, dh, new_w, new_h)));
 
-        // 2. 归一化 & 转换 (HWC -> CHW 是由 blobFromImage 自动完成的)
+        cv::Mat image_resized;
+        cv::resize(image_src, image_resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
+
+        // 直接在resize后进行padding和BGR转RGB，用Scalar(114,114,114)作为填充
+        cv::Mat image_padded;
+        int top = dh;
+        int bottom = input_height - new_h - dh;
+        int left = dw;
+        int right = input_width - new_w - dw;
+        cv::copyMakeBorder(image_resized, image_padded, top, bottom, left, right,
+                          cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
+
+        // 归一化 & 转换 (HWC -> CHW)，同时完成BGR转RGB
         cv::Mat blob = cv::dnn::blobFromImage(image_padded, 1.0 / 255.0, cv::Size(input_width, input_height), cv::Scalar(), true, false);
-        
+
         // 将 blob 数据存入 vector
         std::vector<float> image_data(blob.ptr<float>(), blob.ptr<float>() + blob.total());
         return image_data;
     }
 
-    // 后处理
-    void postprocess(const float* output_data, bool ultralytics, 
+    // 后处理 - 按类别独立进行 NMS (提升 mAP 的关键)
+    void postprocess(const float* output_data, bool ultralytics, float scale, int dw, int dh,
                      std::vector<cv::Vec4f>& final_boxes, std::vector<float>& final_scores, std::vector<int>& final_classes) {
+
+        std::vector<float> all_scores;
+        std::vector<int> all_classes;
+        std::vector<cv::Vec4f> all_boxes;  // 存 cx, cy, w, h 格式 (Python 中的 boxes)
+
+        all_scores.reserve(10000);
+        all_classes.reserve(10000);
+        all_boxes.reserve(10000);
+
+        float inv_scale = 1.f / scale;
         
-        std::vector<cv::Rect> opencv_boxes;  // 专门给 cv::dnn::NMSBoxes 用的 (x, y, w, h)
-        std::vector<cv::Vec4f> nms_boxes;    // 存 x1, y1, x2, y2
-        std::vector<float> scores;
-        std::vector<int> class_ids;
+
 
         if (ultralytics) {
-            // YOLOv8/v11 格式: 通常为 [1, 4 + num_classes, num_anchors] -> [1, 84, 8400]
-            // 数据在内存中是按通道 (channel) 连续的
-            int num_anchors = output_shape[2]; 
+            // YOLOv8/v11 格式: 输出 shape: [1, 4 + num_classes, num_anchors] -> [1, 84, 8400]
+            // 数据在内存中是按通道连续的: output_data[channel * num_anchors + anchor_idx]
+            int num_anchors = output_shape[2];
+            int channels = 4 + num_classes;
 
             for (int i = 0; i < num_anchors; i++) {
+                // 转置访问: [cx, cy, w, h, cls0, cls1, ...] -> output_data[channel * num_anchors + i]
+                float cx = output_data[0 * num_anchors + i];
+                float cy = output_data[1 * num_anchors + i];
+                float w  = output_data[2 * num_anchors + i];
+                float h  = output_data[3 * num_anchors + i];
+
+                // 找最大类别分数 - 直接遍历类别
                 float max_score = 0.0f;
                 int max_class_id = -1;
-
-                // 寻找最大类别分数
                 for (int c = 0; c < num_classes; c++) {
                     float score = output_data[(4 + c) * num_anchors + i];
                     if (score > max_score) {
@@ -167,108 +210,124 @@ public:
                 }
 
                 if (max_score >= conf_thres) {
-                    float cx = output_data[0 * num_anchors + i];
-                    float cy = output_data[1 * num_anchors + i];
-                    float w  = output_data[2 * num_anchors + i];
-                    float h  = output_data[3 * num_anchors + i];
-
-                    // 转换为 x1, y1, x2, y2
-                    float x1 = cx - w / 2.0f;
-                    float y1 = cy - h / 2.0f;
-                    float x2 = cx + w / 2.0f;
-                    float y2 = cy + h / 2.0f;
-
-                    nms_boxes.push_back(cv::Vec4f(x1, y1, x2, y2));
-                    opencv_boxes.push_back(cv::Rect(int(x1), int(y1), int(w), int(h)));
-                    scores.push_back(max_score);
-                    class_ids.push_back(max_class_id);
+                    all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
+                    all_scores.push_back(max_score);
+                    all_classes.push_back(max_class_id);
                 }
             }
         } else {
-            // 非 Ultralytics 格式 (如 YOLOv5_u 之前版本): Reshape 为 [1, num_anchors, 5 + num_classes]
+            // 非 Ultralytics 格式: Reshape 为 [1, num_anchors, 5 + num_classes]
             // 数据在内存中是按锚框 (anchor) 连续的: [cx, cy, w, h, obj_conf, cls0, cls1, ...]
-            
-            // 计算总元素推导 num_anchors (对应 Python 的 reshape(1, -1, 5+num_classes))
             int64_t total_elements = 1;
             for (auto s : output_shape) total_elements *= s;
             int dim = 5 + num_classes;
             int num_anchors = total_elements / dim;
 
             for (int i = 0; i < num_anchors; i++) {
-                const float* anchor_data = output_data + i * dim; // 获取当前 anchor 的首地址
-                
-                float obj_conf = anchor_data[4]; // objectness confidence
+                const float* anchor_data = output_data + i * dim;
 
-                float max_class_prob = 0.0f;
-                int max_class_id = -1;
+                float cx = anchor_data[0];
+                float cy = anchor_data[1];
+                float w  = anchor_data[2];
+                float h  = anchor_data[3];
+                float obj_conf = anchor_data[4];
 
-                // 寻找最大类别分数
-                for (int c = 0; c < num_classes; c++) {
-                    float prob = anchor_data[5 + c];
-                    if (prob > max_class_prob) {
-                        max_class_prob = prob;
-                        max_class_id = c;
-                    }
-                }
+                // 找最大类别分数 - 使用 std::max_element 优化
+                const float* class_probs = &anchor_data[5];
+                auto max_iter = std::max_element(class_probs, class_probs + num_classes);
+                float max_class_prob = *max_iter;
+                int max_class_id = static_cast<int>(std::distance(class_probs, max_iter));
 
-                // 计算最终得分: scores = prediction[:, 4:5] * prediction[:, 5:]
+                // 最终得分 = obj_conf * class_prob
                 float final_score = obj_conf * max_class_prob;
 
                 if (final_score >= conf_thres) {
-                    float cx = anchor_data[0];
-                    float cy = anchor_data[1];
-                    float w  = anchor_data[2];
-                    float h  = anchor_data[3];
-
-                    // 转换为 x1, y1, x2, y2
-                    float x1 = cx - w / 2.0f;
-                    float y1 = cy - h / 2.0f;
-                    float x2 = cx + w / 2.0f;
-                    float y2 = cy + h / 2.0f;
-
-                    nms_boxes.push_back(cv::Vec4f(x1, y1, x2, y2));
-                    opencv_boxes.push_back(cv::Rect(int(x1), int(y1), int(w), int(h)));
-                    scores.push_back(final_score);
-                    class_ids.push_back(max_class_id);
+                    all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
+                    all_scores.push_back(final_score);
+                    all_classes.push_back(max_class_id);
                 }
             }
         }
 
-        // 执行 NMS
-        std::vector<int> indices;
-        cv::dnn::NMSBoxes(opencv_boxes, scores, conf_thres, iou_thres, indices);
+        // 按类别独立进行 NMS - 优化版本
+        // 预先按类别分组，避免在循环中重复判断
+        std::vector<std::vector<int>> class_indices(num_classes);
+        for (size_t i = 0; i < all_classes.size(); i++) {
+            int cls_id = all_classes[i];
+            class_indices[cls_id].push_back(i);
+        }
 
-        // 获取最终的检测框 (x1, y1, x2, y2 格式)
-        for (int i : indices) {
-            final_boxes.push_back(nms_boxes[i]);
-            final_scores.push_back(scores[i]);
-            final_classes.push_back(class_ids[i]);
+        // 遍历每个类别
+        for (int cls_id = 0; cls_id < num_classes; cls_id++) {
+            const auto& indices = class_indices[cls_id];
+            if (indices.empty()) continue;
+
+            // 预分配当前类别的向量，避免反复 push_back
+            std::vector<cv::Rect> cls_opencv_boxes;
+            std::vector<float> cls_scores;
+            cls_opencv_boxes.reserve(indices.size());
+            cls_scores.reserve(indices.size());
+
+            // 收集当前类别的框 (存储原始索引，用于后续还原坐标)
+            std::vector<std::pair<int, cv::Vec4f>> cls_boxes_data;
+            cls_boxes_data.reserve(indices.size());
+
+            for (int idx : indices) {
+                float cx = all_boxes[idx][0];
+                float cy = all_boxes[idx][1];
+                float w = all_boxes[idx][2];
+                float h = all_boxes[idx][3];
+
+                // 转换为 x1, y1, x2, y2
+                float x1 = cx - w * 0.5f;
+                float y1 = cy - h * 0.5f;
+                float x2 = cx + w * 0.5f;
+                float y2 = cy + h * 0.5f;
+
+                // OpenCV NMS 需要的 [x, y, w, h] 格式
+                cls_opencv_boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1),
+                                             static_cast<int>(w), static_cast<int>(h));
+                cls_scores.push_back(all_scores[idx]);
+                cls_boxes_data.emplace_back(idx, cv::Vec4f(x1, y1, x2, y2));
+            }
+
+            // 当前类别执行 NMS
+            std::vector<int> nms_indices;
+            cv::dnn::NMSBoxes(cls_opencv_boxes, cls_scores, conf_thres, iou_thres, nms_indices);
+
+            // 还原坐标到原图并收集结果 (inv_scale已在函数开头定义)
+            float neg_dw = -dw;
+            float neg_dh = -dh;
+
+            for (int nms_idx : nms_indices) {
+                const auto& box_data = cls_boxes_data[nms_idx];
+                float x1 = box_data.second[0];
+                float y1 = box_data.second[1];
+                float x2 = box_data.second[2];
+                float y2 = box_data.second[3];
+
+                // 还原坐标: (box - pad) / scale
+                float bx1 = (x1 + neg_dw) * inv_scale;
+                float by1 = (y1 + neg_dh) * inv_scale;
+                float bx2 = (x2 + neg_dw) * inv_scale;
+                float by2 = (y2 + neg_dh) * inv_scale;
+
+                final_boxes.emplace_back(bx1, by1, bx2, by2);
+                final_scores.push_back(cls_scores[nms_idx]);
+                final_classes.push_back(cls_id);
+            }
         }
     }
 
-    cv::Mat draw_results(cv::Mat& img, const std::vector<cv::Vec4f>& boxes, const std::vector<float>& scores, 
-                         const std::vector<int>& classes, float scale, int dw, int dh) {
-        
-        std::vector<std::string> coco_names = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-        "hair drier", "toothbrush"
-    };
+    cv::Mat draw_results(cv::Mat& img, const std::vector<cv::Vec4f>& boxes, const std::vector<float>& scores,
+                         const std::vector<int>& classes) {
 
         for (size_t i = 0; i < boxes.size(); i++) {
-            // 完全对应 Python 代码的坐标还原：
-            // boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad[0]) / scale
-            // boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad[1]) / scale
-            int x1 = std::round((boxes[i][0] - dw) / scale);
-            int y1 = std::round((boxes[i][1] - dh) / scale);
-            int x2 = std::round((boxes[i][2] - dw) / scale);
-            int y2 = std::round((boxes[i][3] - dh) / scale);
+            // boxes 已经是还原到原图的坐标
+            int x1 = std::round(boxes[i][0]);
+            int y1 = std::round(boxes[i][1]);
+            int x2 = std::round(boxes[i][2]);
+            int y2 = std::round(boxes[i][3]);
 
             // 边界截断 clip(0, w) / clip(0, h)
             x1 = std::max(0, std::min(x1, img_w));
@@ -285,8 +344,10 @@ public:
             // 画框
             cv::rectangle(img, cv::Point(x1, y1), cv::Point(x2, y2), color, 2);
 
-            // 写标签
-            std::string label = (cls_id < coco_names.size() ? coco_names[cls_id] : std::to_string(cls_id)) + ": " + std::to_string(score).substr(0, 4);
+            // 写标签 - 使用snprintf优化
+            char score_str[8];
+            snprintf(score_str, sizeof(score_str), "%.2f", score);
+            std::string label = (cls_id < (int)COCO_NAMES.size() ? COCO_NAMES[cls_id] : std::to_string(cls_id)) + ": " + score_str;
             int baseLine;
             cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
             cv::rectangle(img, cv::Point(x1, y1 - labelSize.height - 3), cv::Point(x1 + labelSize.width, y1), color, cv::FILLED);
@@ -303,8 +364,7 @@ public:
         // 预处理
         std::vector<float> input_tensor_values = preprocess(img, scale, dw, dh);
 
-        // 创建 Tensor
-        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        // 创建 Tensor (复用类成员 memory_info)
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(), 
                                                                   input_tensor_values.size(), 
                                                                   input_shape.data(), input_shape.size());
@@ -326,36 +386,64 @@ public:
         std::vector<float> final_scores;
         std::vector<int> final_classes;
 
+        // 预分配内存，避免频繁重新分配
+        final_boxes.reserve(100);
+        final_scores.reserve(100);
+        final_classes.reserve(100);
+
         if (args.end2end) {
-            // 对应 Python: det_boxes = outputs[:,1:5], det_scores = outputs[:, 5], det_classes = outputs[:, 6]
-            // 假设 shape: [num_boxes, 7]
-            int num_boxes = current_output_shape[0];
-            int dim = (current_output_shape.size() > 1) ? current_output_shape[1] : 7; 
+            // 对应 Python: data = data[0]; mask = data[:, 5] > conf_thres
+            // shape: [num_boxes, 7] -> [x1, y1, x2, y2, score, cls]
+            // Python: final_boxes = valid_predictions[:, 1:5], final_scores = valid_predictions[:, 5:6], final_cls = valid_predictions[:, 6]
+            // Python: final_boxes[:, [0, 2]] -= dw; final_boxes[:, [1, 3]] -= dh; final_boxes /= scale
+
+            // 检查是否需要取 data[0] (3D -> 2D)
+            int num_boxes, dim;
+            if (current_output_shape.size() == 3) {
+                num_boxes = current_output_shape[1];
+                dim = current_output_shape[2];
+            } else {
+                num_boxes = current_output_shape[0];
+                dim = current_output_shape[1];
+            }
 
             for (int i = 0; i < num_boxes; i++) {
                 int offset = i * dim;
-                float x1 = output_data[offset + 1];
-                float y1 = output_data[offset + 2];
-                float x2 = output_data[offset + 3];
-                float y2 = output_data[offset + 4];
                 float score = output_data[offset + 5];
-                int cls_id = static_cast<int>(output_data[offset + 6]);
 
-                final_boxes.push_back(cv::Vec4f(x1, y1, x2, y2));
-                final_scores.push_back(score);
-                final_classes.push_back(cls_id);
+                if (score > conf_thres) {
+                    float x1 = output_data[offset + 1];
+                    float y1 = output_data[offset + 2];
+                    float x2 = output_data[offset + 3];
+                    float y2 = output_data[offset + 4];
+                    int cls_id = static_cast<int>(output_data[offset + 6]);
+
+                    // 还原坐标到原图: (box - pad) / scale -> 用乘法优化
+                    float inv_scale = 1.0f / scale;
+                    x1 = (x1 - dw) * inv_scale;
+                    y1 = (y1 - dh) * inv_scale;
+                    x2 = (x2 - dw) * inv_scale;
+                    y2 = (y2 - dh) * inv_scale;
+
+                    final_boxes.push_back(cv::Vec4f(x1, y1, x2, y2));
+                    final_scores.push_back(score);
+                    final_classes.push_back(cls_id);
+                }
             }
-        } 
+        }
         else if (args.end2end_model) {
-            // 对应 Python: outputs = outputs[0]; scores = outputs[:, 4]; mask = scores > conf_thres; ...
-            // 假设 shape: [1, num_boxes, 6] (例如 YOLOv10)
-            int num_boxes = current_output_shape[1]; // Python 取了 outputs[0]，所以维度下降一级
-            int dim = (current_output_shape.size() > 2) ? current_output_shape[2] : 6;
+            // 对应 Python: outputs = outputs[0]; scores = outputs[:, 4]; mask = scores > conf_thres
+            // shape: [1, num_boxes, 6] -> [x1, y1, x2, y2, score, cls]
+            // 需要: predictions[:, [0, 2]] -= dw, predictions[:, [1, 3]] -= dh, predictions[:, :4] /= scale
+
+            // 先取 data[0] (3D -> 2D)
+            int num_boxes = (current_output_shape.size() >= 2) ? current_output_shape[1] : current_output_shape[0];
+            int dim = (current_output_shape.size() >= 2) ? current_output_shape[2] : current_output_shape[1];
 
             for (int i = 0; i < num_boxes; i++) {
                 int offset = i * dim;
                 float score = output_data[offset + 4];
-                
+
                 // mask = scores > self.conf_thres
                 if (score > conf_thres) {
                     float x1 = output_data[offset + 0];
@@ -363,6 +451,13 @@ public:
                     float x2 = output_data[offset + 2];
                     float y2 = output_data[offset + 3];
                     int cls_id = static_cast<int>(output_data[offset + 5]);
+
+                    // 还原坐标: (box - pad) / scale -> 用乘法优化
+                    float inv_scale = 1.0f / scale;
+                    x1 = (x1 - dw) * inv_scale;
+                    y1 = (y1 - dh) * inv_scale;
+                    x2 = (x2 - dw) * inv_scale;
+                    y2 = (y2 - dh) * inv_scale;
 
                     final_boxes.push_back(cv::Vec4f(x1, y1, x2, y2));
                     final_scores.push_back(score);
@@ -374,14 +469,38 @@ public:
             if (final_boxes.empty()) {
                 return {img, 0.0};
             }
-        } 
+        }
         else {
             // 对应 Python: det_boxes, det_scores, det_classes = self.postprocess(...)
-            postprocess(output_data, args.ultralytics, final_boxes, final_scores, final_classes);
+            // ultralytics 模式需要先 transpose 输出
+            if (args.ultralytics) {
+                // 原始输出 shape: [1, 4+num_classes, num_anchors] -> 直接传递，在postprocess中转置访问
+                // 避免额外内存分配：直接访问 output_data[j * num_anchors + i]
+                postprocess(output_data, true, scale, dw, dh, final_boxes, final_scores, final_classes);
+            } else {
+                // 非 ultralytics 模式: 输出可能是 [1, num_anchors, 5+num_classes] 或直接是 [num_anchors, 5+num_classes]
+                // 需要处理 3D 输出，跳过 batch 维度
+                const float* data_ptr = output_data;
+                int64_t num_anchors;
+
+                if (current_output_shape.size() == 3) {
+                    // 3D 输出 [1, num_anchors, 5+num_classes]，跳过 batch 维度
+                    num_anchors = current_output_shape[1];
+                    data_ptr = output_data;  // output_data 已经按行优先排列
+                } else {
+                    // 2D 输出 [num_anchors, 5+num_classes]
+                    num_anchors = current_output_shape[0];
+                }
+
+                // 如果是 3D 输出，需要调整数据指针（跳过第一个 batch 维度的数据）
+                // 但由于 ONNX 输出是连续的，3D [1, N, D] 实际上就是 [N, D] 的数据
+                // 所以直接传递 output_data 即可
+                postprocess(data_ptr, false, scale, dw, dh, final_boxes, final_scores, final_classes);
+            }
         }
 
         // 绘制
-        cv::Mat result_img = draw_results(img, final_boxes, final_scores, final_classes, scale, dw, dh);
+        cv::Mat result_img = draw_results(img, final_boxes, final_scores, final_classes);
 
         return {result_img, inference_time.count()};
     }
@@ -389,15 +508,12 @@ public:
     // 运行主循环
     void run(const Args& args) {
         std::string source = args.source;
-        
-        // 1. 转小写并判断是否为图片 (对齐 Python: ['.jpg', '.jpeg', '.png', '.bmp', '.webp'])
-        std::string lower_source = source;
-        std::transform(lower_source.begin(), lower_source.end(), lower_source.begin(), ::tolower);
-        bool is_image = (lower_source.find(".jpg") != std::string::npos || 
-                         lower_source.find(".jpeg") != std::string::npos || 
-                         lower_source.find(".png") != std::string::npos || 
-                         lower_source.find(".bmp") != std::string::npos || 
-                         lower_source.find(".webp") != std::string::npos);
+
+        // 使用filesystem判断图片后缀
+        std::filesystem::path file_path(source);
+        std::string ext = file_path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        bool is_image = std::find(IMAGE_EXTS.begin(), IMAGE_EXTS.end(), ext) != IMAGE_EXTS.end();
 
         if (is_image) {
             // === 图片模式 ===
@@ -460,12 +576,10 @@ public:
                 // 推理
                 auto [result_img, t] = infer_single_frame(frame, args);
                 
-                // 5. 格式化并显示 FPS
-                std::ostringstream text_stream;
-                text_stream << std::fixed << std::setprecision(1) 
-                            << "FPS: " << (1000.0 / t) 
-                            << " (Inference: " << t << "ms)";
-                cv::putText(result_img, text_stream.str(), cv::Point(20, 40), 
+                // 5. 格式化并显示 FPS - 使用snprintf优化
+                char fps_text[64];
+                snprintf(fps_text, sizeof(fps_text), "FPS: %.1f (Inference: %.1fms)", 1000.0 / t, t);
+                cv::putText(result_img, fps_text, cv::Point(20, 40), 
                             cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
 
                 // 写入视频文件
@@ -503,19 +617,41 @@ public:
 };
 
 int main(int argc, char** argv) {
-    // 简单的参数硬编码，替代 Python 的 argparse
+    // 使用默认参数
     Args args;
-    args.model = "weights/yolov7-tiny.onnx";
-    args.source = "data/1.jpg";
-    args.end2end = false;
-    args.end2end_model = false;
-    args.ultralytics = false;
-    args.no_show = false;
-    args.save = true;
-    
-    // 如果有命令行参数，可以这里解析赋值给 args 结构体
 
-    YoloOnnxRunner runner(args.model, 0.4f, 0.7f, 80);
+    // 命令行参数解析
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--model" && i + 1 < argc) args.model = argv[++i];
+        else if (arg == "--source" && i + 1 < argc) args.source = argv[++i];
+        else if (arg == "--conf" && i + 1 < argc) args.conf_thres = std::stof(argv[++i]);
+        else if (arg == "--iou" && i + 1 < argc) args.iou_thres = std::stof(argv[++i]);
+        else if (arg == "--classes" && i + 1 < argc) args.num_classes = std::stoi(argv[++i]);
+        else if (arg == "--end2end") args.end2end = true;
+        else if (arg == "--end2end_model") args.end2end_model = true;
+        else if (arg == "--ultralytics") args.ultralytics = true;
+        else if (arg == "--no-show") args.no_show = true;
+        else if (arg == "--save") args.save = true;
+        else if (arg == "-h" || arg == "--help") {
+            std::cout << "用法: " << argv[0] << " [选项]\n"
+                      << "选项:\n"
+                      << "  --model <path>      模型路径 (默认: weights/yolo11n.onnx)\n"
+                      << "  --source <path>    输入图片/视频路径或摄像头ID (默认: data/1.jpg)\n"
+                      << "  --conf <float>     置信度阈值 (默认: 0.45)\n"
+                      << "  --iou <float>      IOU阈值 (默认: 0.7)\n"
+                      << "  --classes <int>    类别数 (默认: 80)\n"
+                      << "  --end2end          使用end2end模式\n"
+                      << "  --end2end_model    使用end2end模型模式\n"
+                      << "  --ultralytics      使用ultralytics模式 (默认: true)\n"
+                      << "  --no-show          不显示结果窗口\n"
+                      << "  --save             保存结果\n"
+                      << "  -h, --help         显示帮助信息\n";
+            return 0;
+        }
+    }
+
+    YoloOnnxRunner runner(args.model, args.conf_thres, args.iou_thres, args.num_classes);
     runner.run(args);
 
     return 0;

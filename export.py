@@ -100,7 +100,6 @@ def run_export(opt):
             LOGGER.info("Optimizing graph with onnx-graphsurgeon...")
             graph = gs.import_onnx(onnx_model)
             graph.cleanup().toposort()  #从图形中删除未使用的节点和张量，并对图形进行拓扑排序
-            # final_model = gs.export_onnx(graph)
 
             # Shape Estimation
             final_model = None
