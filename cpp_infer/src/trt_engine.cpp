@@ -32,8 +32,9 @@ const std::vector<std::string> TrtEngine::CLASS_NAMES = {
     "hair drier", "toothbrush"
 };
 
-TrtEngine::TrtEngine(const std::string& engine_path, int max_batch_size, int max_det)
-    : max_batch_size_(max_batch_size), max_det_(max_det), num_classes_(NUM_CLASSES) {
+TrtEngine::TrtEngine(const std::string& engine_path, int max_batch_size, int max_det, float iou_thres)
+    : input_width_(0), input_height_(0),
+      num_classes_(NUM_CLASSES), max_batch_size_(max_batch_size), max_det_(max_det), iou_thres_(iou_thres) {
     load_engine(engine_path);
     allocate_buffers();
 
@@ -160,6 +161,168 @@ void TrtEngine::cleanup() {
     }
 }
 
+// Helper: Convert xywh to xyxy
+static inline void xywh_to_xyxy(float x, float y, float w, float h, float& x1, float& y1, float& x2, float& y2) {
+    x1 = x - w / 2;
+    y1 = y - h / 2;
+    x2 = x + w / 2;
+    y2 = y + h / 2;
+}
+
+// Helper: Apply letterbox transform to bbox coordinates
+static inline void apply_letterbox(float& x1, float& y1, float& x2, float& y2, float dw, float dh, float ratio) {
+    x1 = (x1 - dw) / ratio;
+    y1 = (y1 - dh) / ratio;
+    x2 = (x2 - dw) / ratio;
+    y2 = (y2 - dh) / ratio;
+}
+
+// Unified post-processing for all output formats
+std::vector<Detection> TrtEngine::postprocess_output(const float* output_data, float ratio, float dw, float dh,
+                                                       float conf_threshold, float iou_threshold,
+                                                       bool end2end, bool efficient_end2end,
+                                                       bool ultralytics, bool end2end_model) {
+    std::vector<Detection> detections;
+
+    if (end2end) {
+        // end2end: [max_det, 7] (batch_idx, x1, y1, x2, y2, score, class_id)
+        int num_dets = outputs_[0].shape[0];
+        for (int i = 0; i < num_dets; i++) {
+            float score = output_data[i * 7 + 5];
+            if (score <= conf_threshold) continue;
+            Detection det;
+            det.bbox[0] = (output_data[i * 7 + 1] - dw) / ratio;
+            det.bbox[1] = (output_data[i * 7 + 2] - dh) / ratio;
+            det.bbox[2] = (output_data[i * 7 + 3] - dw) / ratio;
+            det.bbox[3] = (output_data[i * 7 + 4] - dh) / ratio;
+            det.score = score;
+            det.class_id = static_cast<int>(output_data[i * 7 + 6]);
+            detections.push_back(det);
+        }
+    } else if (efficient_end2end) {
+        // efficient_end2end: output is a list [num, boxes, scores, class_ids]
+        int num = static_cast<int>(output_data[0]);
+        for (int i = 0; i < num && i < max_det_; i++) {
+            int idx = 1 + i * 6;
+            float score = output_data[idx + 4];
+            if (score > conf_threshold) {
+                Detection det;
+                det.bbox[0] = (output_data[idx] - dw) / ratio;
+                det.bbox[1] = (output_data[idx + 1] - dh) / ratio;
+                det.bbox[2] = (output_data[idx + 2] - dw) / ratio;
+                det.bbox[3] = (output_data[idx + 3] - dh) / ratio;
+                det.score = score;
+                det.class_id = static_cast<int>(output_data[idx + 5]);
+                detections.push_back(det);
+            }
+        }
+    } else if (end2end_model) {
+        // end2end_model: [batch, num_boxes, 6] (x1, y1, x2, y2, score, class_id)
+        int num_boxes = outputs_[0].shape[1];
+        for (int i = 0; i < num_boxes; i++) {
+            int base_idx = i * 6;
+            float score = output_data[base_idx + 4];
+            if (score > conf_threshold) {
+                Detection det;
+                det.bbox[0] = (output_data[base_idx] - dw) / ratio;
+                det.bbox[1] = (output_data[base_idx + 1] - dh) / ratio;
+                det.bbox[2] = (output_data[base_idx + 2] - dw) / ratio;
+                det.bbox[3] = (output_data[base_idx + 3] - dh) / ratio;
+                det.score = score;
+                det.class_id = static_cast<int>(output_data[base_idx + 5]);
+                detections.push_back(det);
+            }
+        }
+    } else {
+        // Standard or Ultralytics YOLO format
+        bool is_3d = (outputs_[0].shape.size() == 3);
+
+        if (ultralytics && is_3d) {
+            // Ultralytics: [batch, num_classes+4, num_anchors] = [1, 84, 8400]
+            // After Python transpose: [num_anchors, num_classes+4]
+            // Transposed layout: predictions[n, c] = data[0, c, n]
+            int num_anchors = outputs_[0].shape[2];  // 8400
+
+            for (int n = 0; n < num_anchors; n++) {
+                // Get box coordinates: output_data[c * num_anchors + n]
+                float cx = output_data[0 * num_anchors + n];
+                float cy = output_data[1 * num_anchors + n];
+                float w = output_data[2 * num_anchors + n];
+                float h = output_data[3 * num_anchors + n];
+
+                // Skip invalid boxes
+                if (w <= 0 || h <= 0 || cx <= 0 || cy <= 0) continue;
+
+                float x1 = cx - w / 2;
+                float y1 = cy - h / 2;
+                float x2 = cx + w / 2;
+                float y2 = cy + h / 2;
+
+                x1 = (x1 - dw) / ratio;
+                y1 = (y1 - dh) / ratio;
+                x2 = (x2 - dw) / ratio;
+                y2 = (y2 - dh) / ratio;
+
+                for (int c = 0; c < num_classes_; c++) {
+                    float score = output_data[(4 + c) * num_anchors + n];
+                    if (score > conf_threshold) {
+                        Detection det;
+                        det.bbox[0] = x1;
+                        det.bbox[1] = y1;
+                        det.bbox[2] = x2;
+                        det.bbox[3] = y2;
+                        det.score = score;
+                        det.class_id = c;
+                        detections.push_back(det);
+                    }
+                }
+            }
+        } else {
+            // Standard: [batch, num_anchors, 85] or [num_anchors, 85]
+            int num_anchors = is_3d ? outputs_[0].shape[1] : outputs_[0].shape[0];
+            int num_cols = is_3d ? outputs_[0].shape[2] : outputs_[0].shape[1];
+
+            for (int i = 0; i < num_anchors; i++) {
+                int base_idx = is_3d ? i * num_cols : i * (5 + num_classes_);
+                float cx = output_data[base_idx];
+                float cy = output_data[base_idx + 1];
+                float w = output_data[base_idx + 2];
+                float h = output_data[base_idx + 3];
+                float obj_score = output_data[base_idx + 4];
+
+                float x1 = cx - w / 2;
+                float y1 = cy - h / 2;
+                float x2 = cx + w / 2;
+                float y2 = cy + h / 2;
+
+                x1 = (x1 - dw) / ratio;
+                y1 = (y1 - dh) / ratio;
+                x2 = (x2 - dw) / ratio;
+                y2 = (y2 - dh) / ratio;
+
+                for (int c = 0; c < num_classes_; c++) {
+                    float score = obj_score * output_data[base_idx + 5 + c];
+                    if (score > conf_threshold) {
+                        Detection det;
+                        det.bbox[0] = x1;
+                        det.bbox[1] = y1;
+                        det.bbox[2] = x2;
+                        det.bbox[3] = y2;
+                        det.score = score;
+                        det.class_id = c;
+                        detections.push_back(det);
+                    }
+                }
+            }
+        }
+
+        // Apply NMS
+        detections = nms(detections, iou_threshold);
+    }
+
+    return detections;
+}
+
 std::vector<void*> TrtEngine::infer(const std::vector<float>& input_data,
                                       const std::vector<int64_t>& input_shape) {
     // Set input shape
@@ -170,6 +333,11 @@ std::vector<void*> TrtEngine::infer(const std::vector<float>& input_data,
         input_dims.d[i] = input_shape[i];
     }
     context_->setInputShape(input_name, input_dims);
+
+    // Clear output buffers before inference to prevent residual data from previous frame
+    for (auto& output : outputs_) {
+        cudaMemsetAsync(output.device_ptr, 0, output.size, stream_);
+    }
 
     // Copy input data to GPU
     cudaMemcpy(inputs_[0].device_ptr, input_data.data(),
@@ -190,7 +358,7 @@ std::vector<void*> TrtEngine::infer(const std::vector<float>& input_data,
 }
 
 std::vector<Detection> TrtEngine::inference(const std::string& img_path, const std::string& output_path,
-                                              float conf_threshold,
+                                              float conf_threshold, float iou_threshold,
                                               bool end2end, bool efficient_end2end,
                                               bool ultralytics, bool end2end_model) {
     // Read image
@@ -221,114 +389,16 @@ std::vector<Detection> TrtEngine::inference(const std::string& img_path, const s
     std::vector<int64_t> input_shape = {1, 3, input_height_, input_width_};
     auto output_ptrs = infer(input_data, input_shape);
 
-    // Process outputs
-    std::vector<Detection> detections;
-
     // Copy output to host
     std::vector<float> output_data(outputs_[0].size / sizeof(float));
     cudaMemcpy(output_data.data(), outputs_[0].device_ptr,
                 outputs_[0].size, cudaMemcpyDeviceToHost);
 
-    if (end2end) {
-        // end2end model output: [batch, num_boxes, 7] (x1, y1, x2, y2, score, class_id, ...)
-        int num_boxes = outputs_[0].shape[1];
-        for (int i = 0; i < num_boxes; i++) {
-            float score = output_data[i * 7 + 5];
-            if (score > conf_threshold) {
-                Detection det;
-                det.bbox[0] = (output_data[i * 7 + 1] - dw) / ratio;  // x1
-                det.bbox[1] = (output_data[i * 7 + 2] - dh) / ratio;  // y1
-                det.bbox[2] = (output_data[i * 7 + 3] - dw) / ratio;  // x2
-                det.bbox[3] = (output_data[i * 7 + 4] - dh) / ratio;  // y2
-                det.score = score;
-                det.class_id = static_cast<int>(output_data[i * 7 + 6]);
-                detections.push_back(det);
-            }
-        }
-    } else if (efficient_end2end) {
-        // efficient_end2end output: [num, boxes(4), scores, class_ids]
-        int num = static_cast<int>(output_data[0]);
-        for (int i = 0; i < num && i < max_det_; i++) {
-            int idx = 1 + i * 6;
-            float score = output_data[idx + 4];
-            if (score > conf_threshold) {
-                Detection det;
-                det.bbox[0] = (output_data[idx] - dw) / ratio;      // x1
-                det.bbox[1] = (output_data[idx + 1] - dh) / ratio;   // y1
-                det.bbox[2] = (output_data[idx + 2] - dw) / ratio;  // x2
-                det.bbox[3] = (output_data[idx + 3] - dh) / ratio;  // y2
-                det.score = score;
-                det.class_id = static_cast<int>(output_data[idx + 5]);
-                detections.push_back(det);
-            }
-        }
-    } else if (end2end_model) {
-        // end2end_model output: [batch, num_boxes, 6]
-        // Format: x1, y1, x2, y2, score, class_id (already NMS processed)
-        int num_boxes = outputs_[0].shape[1];
-        for (int i = 0; i < num_boxes; i++) {
-            int base_idx = i * 6;  // 6 values per detection
-            float score = output_data[base_idx + 4];
-            int class_id = static_cast<int>(output_data[base_idx + 5]);
-            if (score > conf_threshold) {
-                Detection det;
-                // Coordinates are in letterbox space, convert back to original image
-                det.bbox[0] = (output_data[base_idx] - dw) / ratio;      // x1
-                det.bbox[1] = (output_data[base_idx + 1] - dh) / ratio;  // y1
-                det.bbox[2] = (output_data[base_idx + 2] - dw) / ratio;  // x2
-                det.bbox[3] = (output_data[base_idx + 3] - dh) / ratio;  // y2
-                det.score = score;
-                det.class_id = class_id;
-                detections.push_back(det);
-            }
-        }
-    } else {
-        // Standard YOLO output: [num_boxes, 5+num_classes]
-        int num_boxes = outputs_[0].shape[1];
-        std::vector<std::vector<float>> boxes;
-        std::vector<std::vector<float>> scores;
-
-        for (int i = 0; i < num_boxes; i++) {
-            int base_idx = i * (5 + num_classes_);
-
-            // Get box coordinates (center x, center y, width, height)
-            float cx = output_data[base_idx];
-            float cy = output_data[base_idx + 1];
-            float w = output_data[base_idx + 2];
-            float h = output_data[base_idx + 3];
-
-            // Convert to xyxy
-            float x1 = cx - w / 2;
-            float y1 = cy - h / 2;
-            float x2 = cx + w / 2;
-            float y2 = cy + h / 2;
-
-            // Apply letterbox transform
-            x1 = (x1 - dw) / ratio;
-            y1 = (y1 - dh) / ratio;
-            x2 = (x2 - dw) / ratio;
-            y2 = (y2 - dh) / ratio;
-
-            // Get class scores
-            float obj_score = output_data[base_idx + 4];
-            for (int c = 0; c < num_classes_; c++) {
-                float score = obj_score * output_data[base_idx + 5 + c];
-                if (score > conf_threshold) {
-                    Detection det;
-                    det.bbox[0] = x1;
-                    det.bbox[1] = y1;
-                    det.bbox[2] = x2;
-                    det.bbox[3] = y2;
-                    det.score = score;
-                    det.class_id = c;
-                    detections.push_back(det);
-                }
-            }
-        }
-
-        // Apply NMS
-        detections = nms(detections, 0.45f);
-    }
+    // Process output using unified postprocess function
+    auto detections = postprocess_output(output_data.data(), ratio, dw, dh,
+                                         conf_threshold, iou_threshold,
+                                         end2end, efficient_end2end,
+                                         ultralytics, end2end_model);
 
     // Visualize results
     visualize_detection(origin_img, detections, conf_threshold, CLASS_NAMES);
@@ -339,7 +409,8 @@ std::vector<Detection> TrtEngine::inference(const std::string& img_path, const s
     return detections;
 }
 
-void TrtEngine::detect_video(const std::string& video_path, float conf_threshold,
+void TrtEngine::detect_video(const std::string& video_path, const std::string& output_path,
+                               float conf_threshold, float iou_threshold,
                                bool end2end, bool efficient_end2end,
                                bool ultralytics, bool end2end_model) {
     cv::VideoCapture cap(video_path);
@@ -351,12 +422,16 @@ void TrtEngine::detect_video(const std::string& video_path, float conf_threshold
     int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
     int fps = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
 
-    cv::VideoWriter writer("result.mp4", cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
+    cv::VideoWriter writer(output_path, cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
                            fps, cv::Size(width, height));
 
     cv::Mat frame;
     float curr_fps = 0;
-    int frame_count = 0;
+
+    // Pre-allocate buffers for better performance
+    std::vector<float> input_data(3 * input_height_ * input_width_);
+    std::vector<int64_t> input_shape = {1, 3, input_height_, input_width_};
+    std::vector<float> output_data(outputs_[0].size / sizeof(float));
 
     while (true) {
         cap >> frame;
@@ -368,34 +443,31 @@ void TrtEngine::detect_video(const std::string& video_path, float conf_threshold
         float dw, dh;
         letterbox(frame, img, ratio, dw, dh, input_width_, input_height_);
 
-        // Prepare input data
-        std::vector<float> input_data;
+        // Prepare input data (use pre-allocated buffer)
+        int idx = 0;
         for (int c = 0; c < 3; c++) {
             for (int h = 0; h < input_height_; h++) {
                 for (int w = 0; w < input_width_; w++) {
-                    input_data.push_back(img.at<cv::Vec3b>(h, w)[c] / 255.0f);
+                    input_data[idx++] = img.at<cv::Vec3b>(h, w)[c] / 255.0f;
                 }
             }
         }
 
-        std::vector<int64_t> input_shape = {1, 3, input_height_, input_width_};
-
         auto start_time = std::chrono::high_resolution_clock::now();
-        auto output_ptrs = infer(input_data, input_shape);
+        infer(input_data, input_shape);
         auto end_time = std::chrono::high_resolution_clock::now();
 
         curr_fps = (curr_fps + 1.0f / std::chrono::duration<float>(end_time - start_time).count()) / 2;
 
-        // Copy output to host
-        std::vector<float> output_data(outputs_[0].size / sizeof(float));
+        // Copy output to host (use pre-allocated buffer)
         cudaMemcpy(output_data.data(), outputs_[0].device_ptr,
                     outputs_[0].size, cudaMemcpyDeviceToHost);
 
-        // Process detections (simplified - similar to inference)
-        std::vector<Detection> detections;
-
-        // Note: Add same postprocessing as inference() here
-        // For brevity, using simplified version
+        // Process output using unified postprocess function
+        auto detections = postprocess_output(output_data.data(), ratio, dw, dh,
+                                           conf_threshold, iou_threshold,
+                                           end2end, efficient_end2end,
+                                           ultralytics, end2end_model);
 
         // Visualize
         visualize_detection(frame, detections, conf_threshold, CLASS_NAMES);
@@ -409,8 +481,6 @@ void TrtEngine::detect_video(const std::string& video_path, float conf_threshold
         writer.write(frame);
 
         if (cv::waitKey(1) == 'q') break;
-
-        frame_count++;
     }
 
     cap.release();

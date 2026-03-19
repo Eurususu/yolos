@@ -11,9 +11,9 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--engine", "yolo11s.engine",
-                "--image", "data/1.jpg",
-                "--ultralytics",
+                "--engine", "weights/yolo11s_e2e.engine",
+                "--image", "output_frame.jpg",
+                "--end2end",
             ]
         }
     ]

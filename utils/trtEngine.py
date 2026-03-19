@@ -108,6 +108,10 @@ class BaseEngine(object):
             self.stream
         )
 
+        # 在执行推理前，将所有输出显存块清零，防止上一帧数据残留
+        for out in self.outputs:
+            cudart.cudaMemsetAsync(out['ptr'], 0, out['size'], self.stream)
+
         self.context.execute_async_v3(stream_handle=self.stream)
 
         for i, out in enumerate(self.outputs):
@@ -200,13 +204,12 @@ class BaseEngine(object):
         if isinstance(data, list):
             data = data[0]
 
-        dets = None
-
         if args.end2end:
             mask = data[:, 5] > self.conf_thres
             valid_predictions = data[mask]
             if valid_predictions.shape[0] == 0:
                 print("没有检测到物体")
+                return None
             else:
                 dw, dh = dwdh
                 final_boxes = valid_predictions[:, 1:5]

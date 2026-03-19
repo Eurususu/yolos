@@ -8,9 +8,10 @@ void print_usage(const char* program_name) {
               << "Options:\n"
               << "  -e, --engine <path>    TRT engine path (required)\n"
               << "  -i, --image <path>     Input image path\n"
-              << "  -o, --output <path>    Output image path (default: result.jpg)\n"
+              << "  -o, --output <path>    Output image/video path (default: result.jpg/result.mp4)\n"
               << "  -v, --video <path>     Input video path or camera index\n"
               << "  --conf <float>         Confidence threshold (default: 0.25)\n"
+              << "  --iou <float>          NMS IoU threshold (default: 0.7)\n"
               << "  --end2end              Use end2end engine\n"
               << "  --efficient_end2end   Use efficient_end2end engine\n"
               << "  --ultralytics          Use ultralytics model\n"
@@ -28,9 +29,10 @@ int main(int argc, char* argv[]) {
     // Default values
     std::string engine_path;
     std::string image_path;
-    std::string output_path = "result.jpg";
+    std::string output_path;
     std::string video_path;
     float conf_threshold = 0.25;
+    float iou_threshold = 0.7;
     bool end2end = false;
     bool efficient_end2end = false;
     bool ultralytics = false;
@@ -60,6 +62,10 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 conf_threshold = std::stof(argv[++i]);
             }
+        } else if (arg == "--iou") {
+            if (i + 1 < argc) {
+                iou_threshold = std::stof(argv[++i]);
+            }
         } else if (arg == "--end2end") {
             end2end = true;
         } else if (arg == "--efficient_end2end") {
@@ -87,9 +93,9 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        // Create predictor
+        // Create predictor with iou_threshold
         std::cout << "Loading engine: " << engine_path << std::endl;
-        trtinfer::TrtEngine predictor(engine_path);
+        trtinfer::TrtEngine predictor(engine_path, 1, 300, iou_threshold);
         std::cout << "Engine loaded successfully" << std::endl;
 
         // Get FPS
@@ -98,8 +104,11 @@ int main(int argc, char* argv[]) {
 
         // Run inference on image
         if (!image_path.empty()) {
+            if (output_path.empty()) {
+                output_path = "result.jpg";
+            }
             std::cout << "Processing image: " << image_path << std::endl;
-            auto detections = predictor.inference(image_path, output_path, conf_threshold,
+            auto detections = predictor.inference(image_path, output_path, conf_threshold, iou_threshold,
                                                     end2end, efficient_end2end,
                                                     ultralytics, end2end_model);
             std::cout << "Detected " << detections.size() << " objects" << std::endl;
@@ -108,8 +117,11 @@ int main(int argc, char* argv[]) {
 
         // Run inference on video
         if (!video_path.empty()) {
+            if (output_path.empty()) {
+                output_path = "result.mp4";
+            }
             std::cout << "Processing video: " << video_path << std::endl;
-            predictor.detect_video(video_path, conf_threshold,
+            predictor.detect_video(video_path, output_path, conf_threshold, iou_threshold,
                                     end2end, efficient_end2end,
                                     ultralytics, end2end_model);
         }

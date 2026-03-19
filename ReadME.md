@@ -6,7 +6,7 @@
 `pip install onnx onnxruntime onnxruntime-gpu onnxsim`\
 `pip install /opt/TensorRT/python/tensorrt-10.14.1.48-cp311-none-linux_x86_64.whl`
 `pip install cuda-python==12.8.0`\
-`pip install -U nvidia-modelopt[all]`\
+`pip install -U nvidia-modelopt[all]==0.41.0`\
 `pip install tqdm pycocotools`
 
 
@@ -90,8 +90,10 @@ yolo11n 验证\
 `python utils/prepare_calib.py --image_folder xxx --calibration_size xxx --height xxx --width xxx --output_path xxx`
 ###
 2. int4 int8 fp8量化\
-`python onnx_quantization.py --onnx_path xxx --quantize_mode xxx --calibration_data xxx --calib_method xxx --output_path xxx`\
-这里的int4使用awq_clip量化方法，int8 fp8使用 max或者entropy量化方法,这里的输入onnx模型需要simplify的，opset 19
+`python onnx_quantization.py --onnx_path xxx --quantize_mode xxx --calibration_data xxx --calib_method xxx --output_path xxx --dq_only`\
+这里的int4使用awq_clip量化方法，int8 fp8使用 max或者entropy量化方法,这里的输入onnx模型需要simplify的，opset 19。若是想跳过某些layer的的话，可以添加 --skip_nodes\
+`python onnx_quantization.py --onnx_path weights/yolo11s.onnx --quantize_mode int8 --calibration_data /home/jia/project/carlib_data.npy --calib_method max --output_path weights/yolo11s_int8.onnx --skip_nodes /model/model.23/dfl/Softmax /model/model.23/dfl/Reshape /model/model.23/dfl/conv/Conv /model/model.23/dfl/Transpose --dq_only`
+
 ###
 3. trt生成\
 int4\

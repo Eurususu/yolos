@@ -13,7 +13,7 @@
 struct Args {
     std::string model = "weights/yolov7-tiny.onnx";
     std::string source = "data/1.jpg";
-    float conf_thres = 0.45f;
+    float conf_thres = 0.25f;
     float iou_thres = 0.7f;
     int num_classes = 80;
     bool end2end = false;

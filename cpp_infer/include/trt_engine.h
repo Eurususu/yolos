@@ -21,7 +21,7 @@ struct TensorBinding {
 
 class TrtEngine {
 public:
-    TrtEngine(const std::string& engine_path, int max_batch_size = 1, int max_det = 300);
+    TrtEngine(const std::string& engine_path, int max_batch_size = 1, int max_det = 300, float iou_thres = 0.7f);
     ~TrtEngine();
 
     // Run inference on preprocessed image
@@ -29,12 +29,13 @@ public:
 
     // Run inference on image file
     std::vector<Detection> inference(const std::string& img_path, const std::string& output_path = "result.jpg",
-                                       float conf_threshold = 0.25,
+                                       float conf_threshold = 0.25, float iou_threshold = 0.7f,
                                        bool end2end = false, bool efficient_end2end = false,
                                        bool ultralytics = false, bool end2end_model = false);
 
     // Run inference on video
-    void detect_video(const std::string& video_path, float conf_threshold = 0.25,
+    void detect_video(const std::string& video_path, const std::string& output_path = "result.mp4",
+                      float conf_threshold = 0.25, float iou_threshold = 0.7f,
                       bool end2end = false, bool efficient_end2end = false,
                       bool ultralytics = false, bool end2end_model = false);
 
@@ -51,6 +52,12 @@ private:
     void allocate_buffers();
     void cleanup();
 
+    // Post-process model output
+    std::vector<Detection> postprocess_output(const float* output_data, float ratio, float dw, float dh,
+                                               float conf_threshold, float iou_threshold,
+                                               bool end2end, bool efficient_end2end,
+                                               bool ultralytics, bool end2end_model);
+
     std::unique_ptr<nvinfer1::IRuntime> runtime_;
     std::unique_ptr<nvinfer1::ICudaEngine> engine_;
     std::unique_ptr<nvinfer1::IExecutionContext> context_;
@@ -64,6 +71,7 @@ private:
     int num_classes_;
     int max_batch_size_;
     int max_det_;
+    float iou_thres_;
 
     static const int NUM_CLASSES = 80;
     static const std::vector<std::string> CLASS_NAMES;
