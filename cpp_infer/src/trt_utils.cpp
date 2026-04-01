@@ -53,14 +53,19 @@ float box_iou(const Detection& a, const Detection& b) {
 }
 
 std::vector<Detection> nms(std::vector<Detection>& detections, float nms_threshold) {
+    if (detections.empty()) return {};
     // Sort by score (descending)
     std::sort(detections.begin(), detections.end(),
-               [](const Detection& a, const Detection& b) {
-                   return a.score > b.score;
-               });
+               [](const Detection& a, const Detection& b){
+                    if (a.class_id != b.class_id) {
+                        return a.class_id < b.class_id;
+                    }
+                    return a.score > b.score;
+                    });
 
     std::vector<Detection> result;
-    std::vector<bool> suppressed(detections.size(), false);
+    result.reserve(detections.size() / 2);
+    std::vector<uint8_t> suppressed(detections.size(), 0);
 
     for (size_t i = 0; i < detections.size(); i++) {
         if (suppressed[i]) continue;
@@ -68,13 +73,16 @@ std::vector<Detection> nms(std::vector<Detection>& detections, float nms_thresho
         result.push_back(detections[i]);
 
         for (size_t j = i + 1; j < detections.size(); j++) {
+            if (detections[i].class_id != detections[j].class_id) {
+                break;
+            }
+
             if (suppressed[j]) continue;
 
-            if (detections[i].class_id == detections[j].class_id) {
-                float iou = box_iou(detections[i], detections[j]);
-                if (iou > nms_threshold) {
-                    suppressed[j] = true;
-                }
+            float iou = box_iou(detections[i], detections[j]);
+
+            if (iou > nms_threshold){
+                suppressed[j] = 1;
             }
         }
     }
