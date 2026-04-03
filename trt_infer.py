@@ -25,7 +25,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--engine", help="TRT engine Path")
     parser.add_argument("-i", "--image", help="image path")
-    parser.add_argument("-o", "--output", help="image output path")
+    parser.add_argument("-d", "--directory", help="directory path")
+    parser.add_argument("-o", "--output_dir", help="images output path")
     parser.add_argument("-v", "--video", help="video path or camera index")
     parser.add_argument("--end2end", default=False, action="store_true", help="use end2end engine")
     parser.add_argument("--efficient_end2end", default=False, action="store_true", help='use efficient_end2end engine')
@@ -44,8 +45,10 @@ if __name__ == '__main__':
     pred.get_fps()
 
     if args.image:
-        origin_img = pred.inference(args.image, args)
-        cv2.imwrite(args.output or "result.jpg", origin_img)
-
+        pred.inference(args.image, args)
+        
     if args.video:
         pred.detect_video(args.video, args)
+    
+    if args.directory:
+        pred.inference(args.directory, args)

@@ -6,6 +6,7 @@ import cv2
 from tqdm import tqdm
 import logging
 import warnings
+import time
 
 # 关闭警告
 warnings.filterwarnings('ignore')
@@ -18,11 +19,12 @@ from utils.trtEngine import letterbox
 
 
 class Validator(BaseEngine):
-    def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.65):
+    def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.65, max_batch_size=32):
         super(Validator, self).__init__(engine_path)
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.n_classes = 80
+        self.max_batch_size = max_batch_size
 
     def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):
         boxes = predictions[:, :4]
@@ -175,6 +177,76 @@ class Validator(BaseEngine):
 
             print(f"\nFinal mAP@0.5: {cocoEval.stats[1]:.3f}")
             print(f"Final mAP@0.5:0.95: {cocoEval.stats[0]:.3f}")
+    
+    def benchmark(self, img_path=None, batch_size=1, num_warmup=50, num_runs=200):
+        """
+        测试 TensorRT 引擎在多 Batch 下的吞吐量及各阶段耗时
+        """
+        print(f"\n--- 开始 TensorRT Batch={batch_size} 性能压测 ---")
+        if img_path and os.path.exists(img_path):
+            origin_img = cv2.imread(img_path)
+            print(f"使用图片: {img_path}")
+        else:
+            print("未提供有效图片路径，使用随机生成的 dummy image 进行测试")
+            h, w = self.imgsz if hasattr(self, 'imgsz') else (640, 640)
+            origin_img = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+
+        # 1. 预处理
+        img, ratio, dwdh = letterbox(origin_img, self.imgsz)
+        if img.ndim == 3:
+            img = np.expand_dims(img, axis=0)
+        batch_img_data = np.repeat(img, batch_size, axis=0)
+        batch_img_data = np.ascontiguousarray(batch_img_data)
+
+        # 2. 引擎预热
+        print(f"正在进行 GPU 预热 ({num_warmup} 次)...")
+        try:
+            for _ in range(num_warmup):
+                _ = self.infer(batch_img_data, profile=False)
+        except Exception as e:
+            print(f"\n[错误] 推理失败: {e}")
+            return
+
+        # 3. 正式计时
+        print(f"开始正式计时 (共跑 {num_runs} 个 Batch)...")
+        total_h2d, total_compute, total_d2h = 0.0, 0.0, 0.0
+        
+        start_time = time.perf_counter()
+
+        for _ in range(num_runs):
+            # 开启 profile 模式，接收时间数据
+            _, (h2d, compute, d2h) = self.infer(batch_img_data, profile=True)
+            total_h2d += h2d
+            total_compute += compute
+            total_d2h += d2h
+
+        end_time = time.perf_counter()
+
+        # 4. 计算指标
+        total_time_ms = (end_time - start_time) * 1000
+        avg_batch_time_ms = total_time_ms / num_runs
+        fps = (1000.0 / avg_batch_time_ms) * batch_size
+
+        # 计算各阶段平均耗时
+        avg_h2d = total_h2d / num_runs
+        avg_compute = total_compute / num_runs
+        avg_d2h = total_d2h / num_runs
+        
+        # 因为 CPU 调用 Event 和 Python 循环本身有极小开销，三者相加可能略小于整体端到端时间
+        overhead = avg_batch_time_ms - (avg_h2d + avg_compute + avg_d2h)
+
+        print(f"\n======== 性能报告 (Batch Size: {batch_size}) ========")
+        print(f"H2D 拷贝耗时 (Host->Device):  {avg_h2d:.3f} ms")
+        print(f"GPU Compute 纯计算耗时:       {avg_compute:.3f} ms")
+        print(f"D2H 拷贝耗时 (Device->Host):  {avg_d2h:.3f} ms")
+        print(f"Python 调度及其他开销:        {overhead:.3f} ms")
+        print("-" * 40)
+        print(f"跑完单个 Batch 平均总耗时:    {avg_batch_time_ms:.2f} ms")
+        print(f"折合单张图片推理耗时:         {avg_batch_time_ms / batch_size:.2f} ms")
+        print(f"【极限吞吐量】:               {fps:.2f} FPS")
+        print("===================================================\n")
+        
+        del batch_img_data
 
 
 def parse_args():
@@ -190,6 +262,12 @@ def parse_args():
     parser.add_argument("--iou", type=float, default=0.7, help='NMS IoU threshold')
     parser.add_argument('--ultralytics', default=False, action="store_true", help='whether the model is from ultralytics')
     parser.add_argument('--end2end_model', action="store_true", help='whether the model is end2end')
+    parser.add_argument("--max_batch_size", type=int, default=32, help="Maximum batch size for the engine")
+
+    parser.add_argument("--val", action="store_true", help="Run in validation mode to compute mAP")
+    parser.add_argument("--benchmark", action="store_true", help="Run benchmark to measure FPS")
+    parser.add_argument("--source", type=str, default='data/1.jpg', help="Path to input image for benchmark")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for throughput testing")
     args = parser.parse_args()
     return args
 
@@ -197,5 +275,10 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     engine_path = args.engine
-    val = Validator(engine_path, conf_thres=args.conf, iou_thres=args.iou)
-    val.run_validate(args)
+    val = Validator(engine_path, conf_thres=args.conf, iou_thres=args.iou, max_batch_size=args.max_batch_size)
+    # val.run_validate(args)
+    if args.val:
+        val.run_validate(args)
+        
+    if args.benchmark:
+        val.benchmark(img_path=args.source, batch_size=args.batch_size, num_warmup=20, num_runs=10)

@@ -46,25 +46,25 @@ ultralytics模型 非end2end onnxruntime 推理\
 
 ### trt infer
 yolo11n.engine efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output result.jpg --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --efficient_end2end`
 ###
 yolo11n.engine end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output result.jpg --end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --end2end`
 ###
 yolo11n.engine 非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output result.jpg --ultralytics`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --ultralytics`
 ###
 yolov10s.engine 端到端模型推理\
-`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output result.jpg --end2end_model`
+`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output results --end2end_model`
 ###
 其他非ultralytics efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output result.jpg --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results --efficient_end2end`
 ###
 其他非ultralytics end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output result.jpg --end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results --end2end`
 ###
 其他非ultralytics非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output result.jpg`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results`
 
 ### train
 单卡yolo11n 训练\
@@ -76,13 +76,15 @@ yolov10s.engine 端到端模型推理\
 ### val
 yolo11n 验证\
 `python val.py --model weights/yolo11n.pt --data data/coco.yaml --plot`
-### trt val
+### trt val and fps
 1. 生成json文件，如果没有的话\
 `python utils/yolo2coco.py ----img_dir xxx --label_dir xxx --output xxx --classes xxx`
 2. trt val\
-`python ./trt_val.py --engine /home/jia/3classes_int8_entropy.engine --img_dir /home/jia/project/test_val/images/val --coco_json 3classes.json --end2end --conf 0.001`
+`python ./trt_val_fps.py --engine /home/jia/3classes_int8_entropy.engine --img_dir /home/jia/project/test_val/images/val --coco_json 3classes.json --end2end --conf 0.001 --val`
 3. trt val coco\
-`python ./trt_val.py --engine quant_e2e.engine --img_dir /home/jia/dataset/coco2017/images/val2017 --coco_json /home/jia/dataset/coco2017/annotations/instances_val2017.json --end2end --conf 0.001 --use_coco_map`
+`python ./trt_val_fps.py --engine quant_e2e.engine --img_dir /home/jia/dataset/coco2017/images/val2017 --coco_json /home/jia/dataset/coco2017/annotations/instances_val2017.json --end2end --conf 0.001 --use_coco_map --val`
+4. trt fps\
+`python ./trt_val_fps.py --engine weights/yolo11s.engine --ultralytics --benchmark --max_batch_size 96 --batch_size 96`
 
 
 ## how to quant
