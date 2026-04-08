@@ -395,6 +395,7 @@ if __name__ == "__main__":
 
     # FPS测试
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark to measure FPS")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for benchmarking")
 
     args = parser.parse_args()
 
@@ -413,4 +414,4 @@ if __name__ == "__main__":
         if dummy_img is None:
             dummy_img = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
 
-        runner.benchmark(dummy_img, batch_size=16, num_warmup=50, num_runs=200)
+        runner.benchmark(dummy_img, batch_size=args.batch_size, num_warmup=50, num_runs=200)

@@ -31,7 +31,7 @@ yolo seg模型导出\
 yolo11n.pt推理\
 `python torch_infer.py --weights weights/yolo11n.pt --source data/1.jpg --img_size 736 1280 --half --save`
 
-### onnx infer
+### ort infer
 非端到端模型 onnxruntime end2end模型推理(INMSLayer)\
 `python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --end2end --save`
 ###
@@ -44,27 +44,44 @@ ultralytics模型 非end2end onnxruntime 推理\
 其他非ultralytics模型 非end2end onnxruntime 推理\
 `python ort_infer.py --model weights/yolov7-tiny.onnx --source data/1.jpg --save`
 
+### ort batch infer
+batch_size 支持指定大小的batch进行推理
+非端到端模型 onnxruntime end2end模型推理(INMSLayer)\
+`python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --batch_size 8 --save_dir results  --end2end --save`
+###
+端到端模型 onnxruntime 模型推理\
+`python ort_infer.py --model weights/yolov10s.onnx --source data/1.jpg --batch_size 8 --save_dir results  --end2end_model --save`
+###
+ultralytics模型 非end2end onnxruntime 推理\
+`python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --batch_size 8 --save_dir results  --ultralytics --save`
+###
+其他非ultralytics模型 非end2end onnxruntime 推理\
+`python ort_infer.py --model weights/yolov7-tiny.onnx --source data/1.jpg --batch_size 8 --save_dir results  --save`
+
+
 ### trt infer
+opt_batch_size就是最优的batch推理，max_batch_size就是允许分配最大内存
 yolo11n.engine efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
 ###
 yolo11n.engine end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end`
 ###
 yolo11n.engine 非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output results --ultralytics`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --ultralytics`
 ###
 yolov10s.engine 端到端模型推理\
-`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output results --end2end_model`
+`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end_model`
 ###
 其他非ultralytics efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
 ###
 其他非ultralytics end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results --end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end`
 ###
 其他非ultralytics非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output results`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32`
+
 
 ### train
 单卡yolo11n 训练\
@@ -115,10 +132,10 @@ fp16\
 
 ## run ort infer with cpp
 下载https://github.com/microsoft/onnxruntime/releases 解压到根目录下面\
-`./run_ort.sh`
+`./ort_cpp/run_ort.sh`
 
 ## run ort val and fps test
 1. 端到端模型\
-`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --end2end --val --benchmark`
+`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --end2end --val --benchmark --batch_size 16`
 2. 非端到端模型\
-`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --ultralytics --val --benchmark`
+`python ort_val_fps.py --model weights/yolo11s.onnx --source data/1.jpg --ultralytics --val --benchmark --batch_size 16`
