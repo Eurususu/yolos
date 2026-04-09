@@ -3,7 +3,7 @@
 set -e
 
 # 设置你的 ONNX Runtime 路径
-ORT_DIR="/media/jia/Data/project/yolos/onnxruntime-linux-x64-gpu-1.24.2"
+ORT_DIR="/media/jia/Data/project/yolos/onnxruntime-linux-x64-gpu-1.24.4"
 
 echo "🚀 开始构建项目..."
 
@@ -28,7 +28,8 @@ echo "✅ 编译成功！开始运行 YOLO 推理..."
 echo "------------------------------------------------"
 
 # 运行程序
-./build/yolo_runner
+./build/ort_infer
+./build/ort_infer_batch
 
 echo "------------------------------------------------"
 echo "🎉 运行结束！"

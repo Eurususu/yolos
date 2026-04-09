@@ -11,8 +11,8 @@
 
 // 模拟 Python 的 argparse 参数结构
 struct Args {
-    std::string model = "weights/yolov7-tiny.onnx";
-    std::string source = "data/1.jpg";
+    std::string model = "../weights/yolov7-tiny.onnx";
+    std::string source = "../data/1.jpg";
     float conf_thres = 0.25f;
     float iou_thres = 0.7f;
     int num_classes = 80;
@@ -98,6 +98,9 @@ public:
 
     void getInputDetails() {
         size_t num_input_nodes = session->GetInputCount();
+
+        input_names_str.reserve(num_input_nodes);
+        input_names.reserve(num_input_nodes);
         for (size_t i = 0; i < num_input_nodes; i++) {
             Ort::AllocatedStringPtr input_name = session->GetInputNameAllocated(i, allocator);
             input_names_str.push_back(input_name.get());
@@ -121,6 +124,9 @@ public:
 
     void getOutputDetails() {
         size_t num_output_nodes = session->GetOutputCount();
+
+        output_names_str.reserve(num_output_nodes);
+        output_names.reserve(num_output_nodes);
         for (size_t i = 0; i < num_output_nodes; i++) {
             Ort::AllocatedStringPtr output_name = session->GetOutputNameAllocated(i, allocator);
             output_names_str.push_back(output_name.get());
@@ -170,7 +176,7 @@ public:
     }
 
     // 后处理 - 按类别独立进行 NMS (提升 mAP 的关键)
-    void postprocess(const float* output_data, bool ultralytics, float scale, int dw, int dh,
+    void postprocess(const float* output_data, const std::vector<int64_t>& current_output_shape, bool ultralytics, float scale, int dw, int dh,
                      std::vector<cv::Vec4f>& final_boxes, std::vector<float>& final_scores, std::vector<int>& final_classes) {
 
         std::vector<float> all_scores;
@@ -182,27 +188,37 @@ public:
         all_boxes.reserve(10000);
 
         float inv_scale = 1.f / scale;
+        int ndim = current_output_shape.size();
         
 
 
         if (ultralytics) {
             // YOLOv8/v11 格式: 输出 shape: [1, 4 + num_classes, num_anchors] -> [1, 84, 8400]
             // 数据在内存中是按通道连续的: output_data[channel * num_anchors + anchor_idx]
-            int num_anchors = output_shape[2];
-            int channels = 4 + num_classes;
+            int channels = current_output_shape[ndim - 2];
+            int num_anchors = current_output_shape[ndim - 1];
 
+            cv::Mat out_mat(channels, num_anchors, CV_32F, (void*)output_data);
+            cv::Mat transposed_mat;
+            cv::transpose(out_mat, transposed_mat); // 转置后是 [num_anchors, channels]，访问更连续
+
+            // 获取连续内存的指针
+            const float* t_data = (const float*)transposed_mat.data;
             for (int i = 0; i < num_anchors; i++) {
-                // 转置访问: [cx, cy, w, h, cls0, cls1, ...] -> output_data[channel * num_anchors + i]
-                float cx = output_data[0 * num_anchors + i];
-                float cy = output_data[1 * num_anchors + i];
-                float w  = output_data[2 * num_anchors + i];
-                float h  = output_data[3 * num_anchors + i];
+                // 现在获取单个锚框的数据指针，就和 else 分支一样连续高效了
+                const float* row = t_data + i * channels;
+                
+                float cx = row[0];
+                float cy = row[1];
+                float w  = row[2];
+                float h  = row[3];
 
-                // 找最大类别分数 - 直接遍历类别
                 float max_score = 0.0f;
                 int max_class_id = -1;
+                
+                // 内存连续遍历，CPU Cache 命中率接近 100%
                 for (int c = 0; c < num_classes; c++) {
-                    float score = output_data[(4 + c) * num_anchors + i];
+                    float score = row[4 + c];
                     if (score > max_score) {
                         max_score = score;
                         max_class_id = c;
@@ -215,16 +231,41 @@ public:
                     all_classes.push_back(max_class_id);
                 }
             }
+
+            // for (int i = 0; i < num_anchors; i++) {
+            //     // 转置访问: [cx, cy, w, h, cls0, cls1, ...] -> output_data[channel * num_anchors + i]
+            //     float cx = output_data[0 * num_anchors + i];
+            //     float cy = output_data[1 * num_anchors + i];
+            //     float w  = output_data[2 * num_anchors + i];
+            //     float h  = output_data[3 * num_anchors + i];
+
+            //     // 找最大类别分数 - 直接遍历类别
+            //     float max_score = 0.0f;
+            //     int max_class_id = -1;
+            //     for (int c = 0; c < num_classes; c++) {
+            //         float score = output_data[(4 + c) * num_anchors + i];
+            //         if (score > max_score) {
+            //             max_score = score;
+            //             max_class_id = c;
+            //         }
+            //     }
+
+            //     if (max_score >= conf_thres) {
+            //         all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
+            //         all_scores.push_back(max_score);
+            //         all_classes.push_back(max_class_id);
+            //     }
+            // }
         } else {
             // 非 Ultralytics 格式: Reshape 为 [1, num_anchors, 5 + num_classes]
             // 数据在内存中是按锚框 (anchor) 连续的: [cx, cy, w, h, obj_conf, cls0, cls1, ...]
-            int64_t total_elements = 1;
-            for (auto s : output_shape) total_elements *= s;
-            int dim = 5 + num_classes;
-            int num_anchors = total_elements / dim;
+            // int64_t total_elements = 1;
+            // for (auto s : output_shape) total_elements *= s;
+            int num_anchors = current_output_shape[ndim - 2];
+            int channels = current_output_shape[ndim - 1];
 
             for (int i = 0; i < num_anchors; i++) {
-                const float* anchor_data = output_data + i * dim;
+                const float* anchor_data = output_data + i * channels;
 
                 float cx = anchor_data[0];
                 float cy = anchor_data[1];
@@ -476,7 +517,7 @@ public:
             if (args.ultralytics) {
                 // 原始输出 shape: [1, 4+num_classes, num_anchors] -> 直接传递，在postprocess中转置访问
                 // 避免额外内存分配：直接访问 output_data[j * num_anchors + i]
-                postprocess(output_data, true, scale, dw, dh, final_boxes, final_scores, final_classes);
+                postprocess(output_data, current_output_shape, true, scale, dw, dh, final_boxes, final_scores, final_classes);
             } else {
                 // 非 ultralytics 模式: 输出可能是 [1, num_anchors, 5+num_classes] 或直接是 [num_anchors, 5+num_classes]
                 // 需要处理 3D 输出，跳过 batch 维度
@@ -495,7 +536,7 @@ public:
                 // 如果是 3D 输出，需要调整数据指针（跳过第一个 batch 维度的数据）
                 // 但由于 ONNX 输出是连续的，3D [1, N, D] 实际上就是 [N, D] 的数据
                 // 所以直接传递 output_data 即可
-                postprocess(data_ptr, false, scale, dw, dh, final_boxes, final_scores, final_classes);
+                postprocess(data_ptr, current_output_shape, false, scale, dw, dh, final_boxes, final_scores, final_classes);
             }
         }
 

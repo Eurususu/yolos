@@ -132,7 +132,13 @@ fp16\
 
 ## run ort infer with cpp
 下载https://github.com/microsoft/onnxruntime/releases 解压到根目录下面\
-`./ort_cpp/run_ort.sh`
+`cd ort_cpp`
+编译试运行
+`./run_ort.sh`
+单帧推理
+`./build/ort_infer --model xxx --source xxx --save`
+单帧多帧推理
+`./build/ort_infer_batch --model xxx --source xxx --batch_size xxx --save_dir xxx --save `
 
 ## run ort val and fps test
 1. 端到端模型\
