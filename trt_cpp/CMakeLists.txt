@@ -29,6 +29,7 @@ set(SOURCES
 )
 
 add_executable(trt_infer ${SOURCES})
+add_executable(trt_infer_batch src/trt_infer_batch.cpp)
 
 # Link libraries
 target_link_libraries(trt_infer
@@ -36,12 +37,25 @@ target_link_libraries(trt_infer
     ${CUDA_LIBRARIES}
     nvinfer
     nvonnxparser
+    nvinfer_plugin
+)
+target_link_libraries(trt_infer_batch
+    ${OpenCV_LIBS}
+    ${CUDA_LIBRARIES}
+    nvinfer
+    nvonnxparser
+    nvinfer_plugin
 )
 
 # Compile options
 target_compile_options(trt_infer PRIVATE -Wall -O3)
+target_compile_options(trt_infer_batch PRIVATE -Wall -O3)
+
 
 # Set output directory
 set_target_properties(trt_infer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+set_target_properties(trt_infer_batch PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

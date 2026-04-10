@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cuda_runtime.h>
 #include <opencv2/opencv.hpp>
+#include <NvInferPlugin.h>
 
 // TensorRT logger implementation
 class TrtLogger : public nvinfer1::ILogger {
@@ -66,6 +67,7 @@ void TrtEngine::load_engine(const std::string& engine_path) {
 
     // Create runtime and deserialize engine
     runtime_ = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(gLogger));
+    initLibNvInferPlugins(&gLogger, "");
     engine_ = std::unique_ptr<nvinfer1::ICudaEngine>(
         runtime_->deserializeCudaEngine(buffer.data(), size));
 

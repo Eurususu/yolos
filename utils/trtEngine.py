@@ -94,6 +94,7 @@ class BaseEngine(object):
             if is_input:
                 self.inputs.append(binding)
             else:
+                binding['host_buffer'] = np.empty(shape, dtype=binding['dtype'])
                 self.outputs.append(binding)
             self.allocations.append(ptr)
 
@@ -137,13 +138,9 @@ class BaseEngine(object):
         input_binding = self.inputs[0]
         input_name = input_binding['name']
 
-        # 1. 告诉 TRT 当前输入的真实维度
         self.context.set_input_shape(input_name, img.shape)
-
-        # 获取当前输入的真实字节大小
         input_bytes = img.nbytes
 
-        # --- [Profile] 创建事件并记录 H2D 开始 ---
         if profile:
             _, event_start = cudart.cudaEventCreate()
             _, event_h2d_end = cudart.cudaEventCreate()
@@ -151,7 +148,7 @@ class BaseEngine(object):
             _, event_d2h_end = cudart.cudaEventCreate()
             cudart.cudaEventRecord(event_start, self.stream)
 
-        # 2. H2D: 将输入从 CPU 拷贝到 GPU
+        # 1. H2D
         cudart.cudaMemcpyAsync(
             input_binding['ptr'],
             img.ctypes.data,
@@ -160,81 +157,69 @@ class BaseEngine(object):
             self.stream
         )
 
-        # --- [Profile] 记录 H2D 结束，GPU Compute 开始 ---
-        if profile:
-            cudart.cudaEventRecord(event_h2d_end, self.stream)
+        if profile: cudart.cudaEventRecord(event_h2d_end, self.stream)
 
-        outputs = []
-        # 3. 动态获取真实的输出维度，并分配 Host 内存
+        # 2. 推理前洗地
         for out in self.outputs:
-            # out_name = out['name']
-            
-            # 【核心修复】TRT 10+: 从 context 获取当前输入下的真实输出维度，消除 -1
-            # actual_shape = tuple(self.context.get_tensor_shape(out_name))
-            
-            # 使用真实维度创建接收数据的 numpy 数组
-            out_buffer = np.empty(out['shape'], dtype=out['dtype'])
-            # out_buffer = np.zeros(actual_shape, dtype=out['dtype'])
-            outputs.append(out_buffer)
-            
-            # 在执行推理前，将对应的 GPU 显存块清零 (使用当前真实的字节数) 纯测推理性能时不需要清零
-            # cudart.cudaMemsetAsync(out['ptr'], 0, out_buffer.nbytes, self.stream)
+            cudart.cudaMemsetAsync(out['ptr'], 0, out['size'], self.stream)
 
-        # 4. 异步执行推理
+        # 3. 异步执行推理
         self.context.execute_async_v3(stream_handle=self.stream)
 
-        # --- [Profile] 记录 GPU Compute 结束，D2H 开始 ---
-        if profile:
-            cudart.cudaEventRecord(event_compute_end, self.stream)
+        if profile: cudart.cudaEventRecord(event_compute_end, self.stream)
 
-        # 5. 将输出从 GPU 拷回 CPU
-        for i, out in enumerate(self.outputs):
-            # 获取对应的真实字节大小
-            out_bytes = outputs[i].nbytes
+        # 4. 精准 D2H 拷贝 (直接写进预分配的 host_buffer)
+        for out in self.outputs:
+            actual_shape = tuple(self.context.get_tensor_shape(out['name']))
+
+            # 动态计算真实拷贝大小
+            if -1 in actual_shape:
+                # 兜底：插件不回传真实大小，拷回整块最大显存
+                actual_shape = tuple(out['shape'])
+                copy_bytes = out['size']
+            else:
+                # 算出真实大小
+                vol = 1
+                for s in actual_shape: vol *= s
+                copy_bytes = vol * out['dtype'].itemsize
+            
+            # 记录这帧实际的 shape，给下面的切片用
+            out['actual_shape'] = actual_shape
+            
+            # 【极致提速】：直接拷入 __init__ 预分配好的 numpy 数组，0 内存分配开销！
             cudart.cudaMemcpyAsync(
-                outputs[i].ctypes.data,
+                out['host_buffer'].ctypes.data,
                 out['ptr'],
-                out_bytes,  # 使用真实大小
+                copy_bytes,  
                 cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
                 self.stream
             )
         
-        # --- [Profile] 记录 D2H 结束 ---
-        if profile:
-            cudart.cudaEventRecord(event_d2h_end, self.stream)
+        if profile: cudart.cudaEventRecord(event_d2h_end, self.stream)
 
-        # 同步流，确保全部计算和拷贝完成
+        # 同步流
         cudart.cudaStreamSynchronize(self.stream)
 
-        # # 6. 同步之后，向 TRT 获取当前这帧的真实动态维度，进行切片
-        # final_outputs = []
-        # for i, out in enumerate(self.outputs):
-        #     out_name = out['name']
-            
-        #     # 此时 GPU 已经算完了，TRT 能够返回真实的 actual_shape (例如 [14, 7])
-        #     actual_shape = tuple(self.context.get_tensor_shape(out_name))
-            
-        #     # 构造切片对象 (例如 actual_shape 为 [14, 7]，则截取 [0:14, 0:7])
-        #     slices = tuple(slice(0, s) for s in actual_shape)
-            
-        #     # 使用 .copy() 使内存连续，并释放巨大的 max_buffer 的引用
-        #     final_outputs.append(outputs[i][slices].copy())
+        # 5. 零拷贝视图返回
+        final_outputs = []
+        for out in self.outputs:
+            # 根据这帧的实际维度，切取预分配内存里的有效部分 (视图，不复制！)
+            slices = tuple(slice(0, s) for s in out['actual_shape'])
+            final_outputs.append(out['host_buffer'][slices])
 
-        # 如果开启了测速，计算时间并返回
         if profile:
             _, h2d_ms = cudart.cudaEventElapsedTime(event_start, event_h2d_end)
             _, compute_ms = cudart.cudaEventElapsedTime(event_h2d_end, event_compute_end)
             _, d2h_ms = cudart.cudaEventElapsedTime(event_compute_end, event_d2h_end)
             
-            # 销毁事件释放资源
             cudart.cudaEventDestroy(event_start)
             cudart.cudaEventDestroy(event_h2d_end)
             cudart.cudaEventDestroy(event_compute_end)
             cudart.cudaEventDestroy(event_d2h_end)
             
-            return outputs, (h2d_ms, compute_ms, d2h_ms)
+            return final_outputs, (h2d_ms, compute_ms, d2h_ms)
         
-        return outputs
+        return final_outputs
 
     def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):
         boxes = predictions[:, :4]
@@ -577,6 +562,7 @@ class BaseEngine(object):
 
         frame_count = 0
         stop_flag = False
+        is_profile = args.profile
         # curr_fps = 0
         while True:
             ret, frame = cap.read()
@@ -594,8 +580,17 @@ class BaseEngine(object):
                 input_tensor = np.vstack(batch_imgs)
                 input_tensor = np.ascontiguousarray(input_tensor)
                 t1 = time.time()
-                data = self.infer(input_tensor)
+                infer_result = self.infer(input_tensor, profile=is_profile)
                 t2 = time.time()
+                if is_profile:
+                    # 分离出 推理数据 和 耗时数据
+                    data, profile_times = infer_result
+                    h2d_ms, compute_ms, d2h_ms = profile_times
+                    
+                    # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+                    print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+                else:
+                    data = infer_result
                 batch_time_ms = (t2 - t1) * 1000
                 fps_curr = 1000 / (batch_time_ms / self.opt_batch_size) # 算出单帧等效 FPS
 
@@ -638,7 +633,16 @@ class BaseEngine(object):
         if len(batch_imgs) > 0 and not stop_flag:
             input_tensor = np.vstack(batch_imgs)
             input_tensor = np.ascontiguousarray(input_tensor)
-            data = self.infer(input_tensor)
+            infer_result = self.infer(input_tensor, profile=is_profile)
+            if is_profile:
+                # 分离出 推理数据 和 耗时数据
+                data, profile_times = infer_result
+                h2d_ms, compute_ms, d2h_ms = profile_times
+                
+                # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+                print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+            else:
+                data = infer_result
             batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
             if not isinstance(batch_dets, list): batch_dets = [batch_dets]
 
@@ -674,6 +678,7 @@ class BaseEngine(object):
         # 如果是处理目录，或者想看保存结果，创建输出文件夹
         save_dir = args.output_dir
         os.makedirs(save_dir, exist_ok=True)
+        is_profile = args.profile
         print(f"准备推理，共计 {total_imgs} 张图片。使用最优 Batch Size (opt_batch_size): {self.opt_batch_size}")
         # 2. 按照 opt_batch_size 切片，循环处理每个 Batch
         for i in range(0, total_imgs, self.opt_batch_size):
@@ -702,8 +707,16 @@ class BaseEngine(object):
             input_tensor = np.ascontiguousarray(input_tensor)
 
             # 3. 执行推理 (TRT 的动态维度会自动接纳真实的 batch 数量)
-            data = self.infer(input_tensor)
-
+            infer_result = self.infer(input_tensor, profile=is_profile)
+            if is_profile:
+                # 分离出 推理数据 和 耗时数据
+                data, profile_times = infer_result
+                h2d_ms, compute_ms, d2h_ms = profile_times
+                
+                # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+                print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+            else:
+                data = infer_result
             # 4. 后处理 (利用我们之前改好的支持多 Batch 的 process_output)
             batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
 
@@ -731,7 +744,7 @@ class BaseEngine(object):
                 
 
             # 打印进度条
-            print(f"已处理进度: {min(i + self.max_batch_size, total_imgs)} / {total_imgs}")
+            print(f"已处理进度: {min(i + self.opt_batch_size, total_imgs)} / {total_imgs}")
 
         print(f"✅ 所有图片处理完毕！已保存至目录: {save_dir}/")
         return None
