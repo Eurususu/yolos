@@ -97,8 +97,7 @@ class YOLO_ONNX_Runner:
 
         return im, scale, (dw, dh)
 
-    @staticmethod
-    def postprocess(predictions, ratio, dwdh=None, ultralytics=False, conf_thres=0.25, iou_thres=0.7):
+    def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):
         boxes = predictions[:, :4]
         if ultralytics:
             scores = predictions[:, 4:]
@@ -117,7 +116,7 @@ class YOLO_ONNX_Runner:
             boxes_xyxy[:, 2] -= dw
             boxes_xyxy[:, 3] -= dh
         boxes_xyxy /= ratio
-        dets = YOLO_ONNX_Runner.multiclass_nms(boxes_xyxy, scores, nms_thr=iou_thres, score_thr=conf_thres)
+        dets = YOLO_ONNX_Runner.multiclass_nms(boxes_xyxy, scores, nms_thr=self.iou_thres, score_thr=self.conf_thres)
         return dets
     
 
@@ -265,9 +264,7 @@ class YOLO_ONNX_Runner:
             else:
                 predictions = data.reshape(1, -1, 5 + self.num_classes)[0]
             dets = self.postprocess(predictions, scale, pad,
-                                    ultralytics=args.ultralytics,
-                                    conf_thres=self.conf_thres,
-                                    iou_thres=self.iou_thres)
+                                    ultralytics=args.ultralytics)
 
         if dets is not None and len(dets) > 0:
             final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]

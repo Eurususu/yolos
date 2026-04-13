@@ -94,6 +94,7 @@ class YoloTRTRunner {
         float conf_thres;
         float iou_thres;
         int num_classes;
+        std::vector<std::string> class_names;
         int max_batch_size;
         int opt_batch_size;
         int max_det;
@@ -109,9 +110,14 @@ class YoloTRTRunner {
 
     public:
         YoloTRTRunner(const std::string& engine_path, int max_batch = 32, int opt_batch = 16, 
-            int max_det = 300, float conf = 0.25f, float iou = 0.7f, int cls = 80)
-            : conf_thres(conf), iou_thres(iou), num_classes(cls), max_batch_size(max_batch), max_det(max_det){
+            int max_det = 300, float conf = 0.25f, float iou = 0.7f, int cls = 80, const std::vector<std::string>& class_names = COCO_NAMES)
+            : conf_thres(conf), iou_thres(iou), num_classes(cls), class_names(class_names), max_batch_size(max_batch), max_det(max_det){
                 opt_batch_size = (opt_batch > 0) ? opt_batch : max_batch_size;
+
+                if (this->class_names.size() != static_cast<size_t>(this->num_classes)){
+                    std::cerr << "[警告] 传入的类别名称数量 (" << this->class_names.size() 
+                            << ") 不等于 num_classes (" << this->num_classes << ")! 画框时可能会越界。" << std::endl;
+                }
 
                 // 1. 加载 engine 二进制文件
                 std::ifstream file(engine_path, std::ios::binary);
@@ -523,7 +529,7 @@ class YoloTRTRunner {
 
                 char score_str[8];
                 snprintf(score_str, sizeof(score_str), "%.2f", score);
-                std::string label = (cls_id < (int)COCO_NAMES.size() ? COCO_NAMES[cls_id] : std::to_string(cls_id)) + ": " + score_str;
+                std::string label = (cls_id < (int)class_names.size() ? class_names[cls_id] : std::to_string(cls_id)) + ": " + score_str;
                 int baseLine;
                 cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
                 cv::rectangle(img, cv::Point(x1, y1 - labelSize.height - 3), cv::Point(x1 + labelSize.width, y1), color, cv::FILLED);

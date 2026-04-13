@@ -36,6 +36,7 @@ if __name__ == '__main__':
     parser.add_argument("--opt_batch_size", type=int, default=16, help="the batch size used for engine optimization")
     parser.add_argument("--max_batch_size", type=int, default=32, help="the max batch size supported by the engine")
     parser.add_argument("--profile", default=False, action="store_true", help="whether to profile the model")
+    parser.add_argument("--no_show", action="store_true", help="do not diaplay the result image")
 
     args = parser.parse_args()
     print(args)

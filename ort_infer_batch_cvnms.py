@@ -104,76 +104,60 @@ class YOLO_ONNX_Runner:
 
         return batch_imgs, batch_ratios, batch_dwdhs
 
-    def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):
-        boxes = predictions[:, :4]
-        if ultralytics:
-            scores = predictions[:, 4:]
-        else:
-            scores = predictions[:, 4:5] * predictions[:, 5:]
-        boxes_xyxy = np.ones_like(boxes)
-        boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.
-        boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.
-        boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2.
-        boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2.
-        if dwdh is not None:
-            dw, dh = dwdh
-            boxes_xyxy[:, 0] -= dw
-            boxes_xyxy[:, 1] -= dh
-            boxes_xyxy[:, 2] -= dw
-            boxes_xyxy[:, 3] -= dh
-        boxes_xyxy /= ratio
-        dets = YOLO_ONNX_Runner.multiclass_nms(boxes_xyxy, scores, nms_thr=self.iou_thres, score_thr=self.conf_thres)
-        return dets
+    def postprocess(self, output, scale, pad, ultralytics):
+        """后处理：解析YOLO输出, NMS, 坐标还原"""
+        prediction = output
 
-    @staticmethod
-    def multiclass_nms(boxes, scores, nms_thr, score_thr):
-        """高效 Offset NMS"""
-        i, j = np.where(scores > score_thr)
-        if len(i) == 0:
-            return None
-        valid_boxes = boxes[i]
-        valid_scores = scores[i, j]
-        valid_cls = j
+        # 拆分 Box 和 Scores
+        boxes = prediction[:, 0:4]
+        if ultralytics:
+            scores = prediction[:, 4:]
+        else:
+            scores = prediction[:, 4:5] * prediction[:, 5:]
         
-        max_coord = valid_boxes.max()
-        offsets = valid_cls.astype(valid_boxes.dtype) * (max_coord + 1000)
-        boxes_for_nms = valid_boxes + offsets[:, None]
-        
-        keep = YOLO_ONNX_Runner.nms(boxes_for_nms, valid_scores, nms_thr)
-        if len(keep) == 0:
+        # 3. 准备收集结果
+        final_dets = []
+        dw, dh = pad
+
+        # 4. 遍历每个类别独立进行 NMS (这是提升 mAP 的关键)
+        for i in range(self.num_classes):
+            cls_scores = scores[:, i]
+            mask = cls_scores > self.conf_thres
+            if not np.any(mask):
+                continue
+            
+            # 过滤当前类别的框
+            cls_boxes = boxes[mask]
+            cls_scores_filtered = cls_scores[mask]
+            
+            # 转换为 OpenCV 要求的 [x, y, w, h] 格式
+            # 直接计算，减少中间变量误差
+            cv_boxes = []
+            for b in cls_boxes:
+                # [x_center, y_center, w, h] -> [x_min, y_min, w, h]
+                cv_boxes.append([float(b[0] - b[2]/2), float(b[1] - b[3]/2), float(b[2]), float(b[3])])
+            
+            # 执行 NMS
+            indices = cv2.dnn.NMSBoxes(cv_boxes, cls_scores_filtered.tolist(), self.conf_thres, self.iou_thres)
+            
+            if len(indices) > 0:
+                for idx in indices.flatten():
+                    # 还原坐标到原图
+                    # 提取该类别 NMS 后的原始坐标 [cx, cy, w, h]
+                    b = cls_boxes[idx]
+                    score = cls_scores_filtered[idx]
+                    
+                    bx1 = (b[0] - b[2] / 2 - dw) / scale
+                    by1 = (b[1] - b[3] / 2 - dh) / scale
+                    bx2 = (b[0] + b[2] / 2 - dw) / scale
+                    by2 = (b[1] + b[3] / 2 - dh) / scale
+                    
+                    final_dets.append([bx1, by1, bx2, by2, score, i])
+
+        if len(final_dets) == 0:
             return None
             
-        dets = np.concatenate([valid_boxes[keep], valid_scores[keep, None], valid_cls[keep, None]], axis=1)
-        return dets
-
-    @staticmethod
-    def nms(boxes, scores, nms_thr):
-        x1 = boxes[:, 0]
-        y1 = boxes[:, 1]
-        x2 = boxes[:, 2]
-        y2 = boxes[:, 3]
-
-        areas = (x2 - x1) * (y2 - y1)
-        order = scores.argsort()[::-1]
-
-        keep = []
-        while order.size > 0:
-            i = order[0]
-            keep.append(i)
-            xx1 = np.maximum(x1[i], x1[order[1:]])
-            yy1 = np.maximum(y1[i], y1[order[1:]])
-            xx2 = np.minimum(x2[i], x2[order[1:]])
-            yy2 = np.minimum(y2[i], y2[order[1:]])
-
-            w = np.maximum(0.0, xx2 - xx1)
-            h = np.maximum(0.0, yy2 - yy1)
-            inter = w * h
-            ovr = inter / (areas[i] + areas[order[1:]] - inter)
-
-            inds = np.where(ovr <= nms_thr)[0]
-            order = order[inds + 1]
-
-        return keep
+        return np.array(final_dets)
 
     def process_output(self, data, ratios, dwdhs, args, real_batch_size):
         """剥离后的后处理函数，支持多 Batch 解析"""
