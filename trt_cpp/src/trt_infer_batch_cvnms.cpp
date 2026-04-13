@@ -10,7 +10,6 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 #include <NvInferPlugin.h>
-#include <numeric>
 
 
 namespace fs = std::filesystem;
@@ -108,70 +107,6 @@ class YoloTRTRunner {
         std::vector<TensorInfo> io_tensors;
         int input_width;
         int input_height;
-
-        static float box_iou(const cv::Vec4f& a, const cv::Vec4f& b){
-            float x1 = std::max(a[0], b[0]);
-            float y1 = std::max(a[1], b[1]);
-            float x2 = std::min(a[2], b[2]);
-            float y2 = std::min(a[3], b[3]);
-
-            float w = std::max(0.0f, x2 - x1);
-            float h = std::max(0.0f, y2 - y1);
-            float inter = w * h;
-
-            float area_a = (a[2] - a[0]) * (a[3] - a[1]);
-            float area_b = (b[2] - b[0]) * (b[3] - b[1]);
-            float uni = area_a + area_b - inter;
-
-            if (uni <= 0.0f) return 0.0f;
-            return inter / uni;
-        }
-
-        static std::vector<int> nms (const std::vector<cv::Vec4f>& boxes,
-                                    const std::vector<float>& scores,
-                                    const std::vector<int>& classes,
-                                    float nms_threshold){
-            if (scores.empty()) return {};
-            
-            // 初始化一个索引数组[0,1,2...,N-1]
-            std::vector<int> indices(scores.size());
-            std::iota(indices.begin(), indices.end(), 0);
-
-            // 利用 Lambda 表达式根据类别和分数对“索引”进行排序
-            std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-                if (classes[a] != classes[b]) {
-                    return classes[a] < classes[b];
-                }
-                return scores[a] > scores[b];
-            });
-
-            std::vector<int> keep;
-            keep.reserve(scores.size() / 2);
-            std::vector<uint8_t> suppressed(scores.size(), 0);
-
-            for (size_t i = 0; i < indices.size(); i++) {
-                int idx_i = indices[i];
-                if (suppressed[idx_i]) continue;
-
-                keep.push_back(idx_i);
-
-                for (size_t j = i + 1; j < indices.size(); j++) {
-                    int idx_j = indices[j];
-                    
-                    // 如果类别不同，直接跳出内层循环 (因为已经按类别排序过了)
-                    if (classes[idx_i] != classes[idx_j]) break;
-
-                    if (suppressed[idx_j]) continue;
-
-                    // 使用对应索引的框计算 IoU
-                    if (box_iou(boxes[idx_i], boxes[idx_j]) > nms_threshold) {
-                        suppressed[idx_j] = 1;
-                    }
-                }
-            }
-            return keep;
-
-        }
 
     public:
         YoloTRTRunner(const std::string& engine_path, int max_batch = 32, int opt_batch = 16, 
@@ -326,117 +261,9 @@ class YoloTRTRunner {
         }
 
 
-        // // NMS 处理单张图 (用于非 end2end 模型)
-        // void postprocess_single(const float* output_data, bool ultralytics, int num_anchors, int channels,
-        //                     float scale, int dw, int dh, BatchResult& res){
-        //     std::vector<float> all_scores;
-        //     std::vector<int> all_classes;
-        //     std::vector<cv::Vec4f> all_boxes;
-
-        //     all_scores.reserve(num_anchors);
-        //     all_classes.reserve(num_anchors);
-        //     all_boxes.reserve(num_anchors);
-
-        //     if (ultralytics){
-        //         cv::Mat out_mat(channels, num_anchors, CV_32F, (void*)output_data);
-        //         cv::Mat transposed_mat;
-        //         cv::transpose(out_mat, transposed_mat);
-                
-        //         // 获取连续内存的指针
-        //         const float* t_data = (const float*)transposed_mat.data;
-        //         for (int i = 0; i < num_anchors; i++){
-        //             const float* row = t_data + i * channels;
-        //             float cx = row[0], cy = row[1], w = row[2], h = row[3];
-
-        //             float max_score = 0.0f;
-        //             int max_class_id = -1;
-        //             // 找到分数最高的类别
-        //             for(int c = 0; c < num_classes; c++){
-        //                 float score = row[4 + c];
-        //                 if(score > max_score){
-        //                     max_score = score;
-        //                     max_class_id = c;
-        //                 }
-        //             }
-
-        //             if (max_score > conf_thres){
-        //                 all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
-        //                 all_scores.push_back(max_score);
-        //                 all_classes.push_back(max_class_id);
-        //             }
-
-        //         }
-        //     } else {
-        //         for (int i = 0; i < num_anchors; i++){
-        //             const float* anchor_data = output_data + i * channels;
-        //             float cx = anchor_data[0], cy = anchor_data[1], w = anchor_data[2], h = anchor_data[3];
-        //             float obj_conf = anchor_data[4];
-
-        //             const float* class_probs = &anchor_data[5];
-        //             auto max_iter = std::max_element(class_probs, class_probs + num_classes);
-        //             float max_class_prob = *max_iter;
-        //             int max_class_id = static_cast<int>(std::distance(class_probs, max_iter));
-
-        //             float final_score = obj_conf * max_class_prob;
-        //             if (final_score >= conf_thres) {
-        //                 all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
-        //                 all_scores.push_back(final_score);
-        //                 all_classes.push_back(max_class_id);
-        //             }
-        //         }
-        //     }
-
-        //     // [[0类的索引],[1类的索引],...[num_classes类索引]]
-        //     std::vector<std::vector<int>> class_indices(num_classes);
-        //     for (size_t i = 0; i < all_classes.size(); i++){
-        //         class_indices[all_classes[i]].push_back(i);
-        //     }
-
-        //     float inv_scale = 1.f / scale;
-        //     float neg_dw = -dw;
-        //     float neg_dh = -dh;
-
-        //     for (int cls_id = 0; cls_id < num_classes; cls_id++){
-        //         const auto& indices = class_indices[cls_id];
-        //         if (indices.empty()) continue;
-
-        //         std::vector<cv::Rect> cls_opencv_boxes;
-        //         std::vector<float> cls_scores;
-        //         std::vector<std::pair<int, cv::Vec4f>> cls_boxes_data;
-
-        //         for (int idx : indices){
-        //             float cx = all_boxes[idx][0], cy = all_boxes[idx][1];
-        //             float w = all_boxes[idx][2], h = all_boxes[idx][3];
-
-        //             float x1 = cx - w * 0.5f, y1 = cy - h * 0.5f;
-        //             float x2 = cx + w * 0.5f, y2 = cy + h * 0.5f;
-
-        //             cls_opencv_boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1),
-        //                                       static_cast<int>(w), static_cast<int>(h));
-                    
-        //             cls_scores.push_back(all_scores[idx]);
-        //             cls_boxes_data.emplace_back(idx, cv::Vec4f(x1, y1, x2, y2));
-        //         }
-
-        //         std::vector<int> nms_indices;
-        //         cv::dnn::NMSBoxes(cls_opencv_boxes, cls_scores, conf_thres, iou_thres, nms_indices);
-
-        //         for (int nms_idx : nms_indices) {
-        //             const auto& box_data = cls_boxes_data[nms_idx];
-        //             float bx1 = (box_data.second[0] + neg_dw) * inv_scale;
-        //             float by1 = (box_data.second[1] + neg_dh) * inv_scale;
-        //             float bx2 = (box_data.second[2] + neg_dw) * inv_scale;
-        //             float by2 = (box_data.second[3] + neg_dh) * inv_scale;
-
-        //             res.boxes.emplace_back(bx1, by1, bx2, by2);
-        //             res.scores.push_back(cls_scores[nms_idx]);
-        //             res.classes.push_back(cls_id);
-        //         }
-        //     }
-
-        // }
+        // NMS 处理单张图 (用于非 end2end 模型)
         void postprocess_single(const float* output_data, bool ultralytics, int num_anchors, int channels,
-                                float scale, int dw, int dh, BatchResult& res) {
+                            float scale, int dw, int dh, BatchResult& res){
             std::vector<float> all_scores;
             std::vector<int> all_classes;
             std::vector<cv::Vec4f> all_boxes;
@@ -445,19 +272,21 @@ class YoloTRTRunner {
             all_classes.reserve(num_anchors);
             all_boxes.reserve(num_anchors);
 
-            if (ultralytics) {
+            if (ultralytics){
                 cv::Mat out_mat(channels, num_anchors, CV_32F, (void*)output_data);
                 cv::Mat transposed_mat;
                 cv::transpose(out_mat, transposed_mat);
                 
+                // 获取连续内存的指针
                 const float* t_data = (const float*)transposed_mat.data;
-                for (int i = 0; i < num_anchors; i++) {
+                for (int i = 0; i < num_anchors; i++){
                     const float* row = t_data + i * channels;
                     float cx = row[0], cy = row[1], w = row[2], h = row[3];
 
                     float max_score = 0.0f;
                     int max_class_id = -1;
-                    for(int c = 0; c < num_classes; c++) {
+                    // 找到分数最高的类别
+                    for(int c = 0; c < num_classes; c++){
                         float score = row[4 + c];
                         if(score > max_score){
                             max_score = score;
@@ -465,15 +294,15 @@ class YoloTRTRunner {
                         }
                     }
 
-                    if (max_score > conf_thres) {
-                        // 【优化】：直接将 cx, cy, w, h 转换为 x1, y1, x2, y2 存入
-                        all_boxes.push_back(cv::Vec4f(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f));
+                    if (max_score > conf_thres){
+                        all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
                         all_scores.push_back(max_score);
                         all_classes.push_back(max_class_id);
                     }
+
                 }
             } else {
-                for (int i = 0; i < num_anchors; i++) {
+                for (int i = 0; i < num_anchors; i++){
                     const float* anchor_data = output_data + i * channels;
                     float cx = anchor_data[0], cy = anchor_data[1], w = anchor_data[2], h = anchor_data[3];
                     float obj_conf = anchor_data[4];
@@ -485,39 +314,61 @@ class YoloTRTRunner {
 
                     float final_score = obj_conf * max_class_prob;
                     if (final_score >= conf_thres) {
-                        // 【优化】：直接将 cx, cy, w, h 转换为 x1, y1, x2, y2 存入
-                        all_boxes.push_back(cv::Vec4f(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f));
+                        all_boxes.push_back(cv::Vec4f(cx, cy, w, h));
                         all_scores.push_back(final_score);
                         all_classes.push_back(max_class_id);
                     }
                 }
             }
 
-            // -------------------------------------------------------------
-            // 这里彻底删除了原来冗余的 class_indices 和 cv::dnn 的 NMS 逻辑
-            // -------------------------------------------------------------
+            // [[0类的索引],[1类的索引],...[num_classes类索引]]
+            std::vector<std::vector<int>> class_indices(num_classes);
+            for (size_t i = 0; i < all_classes.size(); i++){
+                class_indices[all_classes[i]].push_back(i);
+            }
 
-            // 调用我们的静态 NMS，获取最终需要保留的框的索引
-            std::vector<int> keep_indices = nms(all_boxes, all_scores, all_classes, iou_thres);
-
-            // 计算缩放和平移还原系数
             float inv_scale = 1.f / scale;
             float neg_dw = -dw;
             float neg_dh = -dh;
 
-            // 遍历保留的索引，映射回原图并存入结果中
-            for (int idx : keep_indices) {
-                const cv::Vec4f& box = all_boxes[idx];
-                
-                float bx1 = (box[0] + neg_dw) * inv_scale;
-                float by1 = (box[1] + neg_dh) * inv_scale;
-                float bx2 = (box[2] + neg_dw) * inv_scale;
-                float by2 = (box[3] + neg_dh) * inv_scale;
+            for (int cls_id = 0; cls_id < num_classes; cls_id++){
+                const auto& indices = class_indices[cls_id];
+                if (indices.empty()) continue;
 
-                res.boxes.emplace_back(bx1, by1, bx2, by2);
-                res.scores.push_back(all_scores[idx]);
-                res.classes.push_back(all_classes[idx]);
+                std::vector<cv::Rect> cls_opencv_boxes;
+                std::vector<float> cls_scores;
+                std::vector<std::pair<int, cv::Vec4f>> cls_boxes_data;
+
+                for (int idx : indices){
+                    float cx = all_boxes[idx][0], cy = all_boxes[idx][1];
+                    float w = all_boxes[idx][2], h = all_boxes[idx][3];
+
+                    float x1 = cx - w * 0.5f, y1 = cy - h * 0.5f;
+                    float x2 = cx + w * 0.5f, y2 = cy + h * 0.5f;
+
+                    cls_opencv_boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1),
+                                              static_cast<int>(w), static_cast<int>(h));
+                    
+                    cls_scores.push_back(all_scores[idx]);
+                    cls_boxes_data.emplace_back(idx, cv::Vec4f(x1, y1, x2, y2));
+                }
+
+                std::vector<int> nms_indices;
+                cv::dnn::NMSBoxes(cls_opencv_boxes, cls_scores, conf_thres, iou_thres, nms_indices);
+
+                for (int nms_idx : nms_indices) {
+                    const auto& box_data = cls_boxes_data[nms_idx];
+                    float bx1 = (box_data.second[0] + neg_dw) * inv_scale;
+                    float by1 = (box_data.second[1] + neg_dh) * inv_scale;
+                    float bx2 = (box_data.second[2] + neg_dw) * inv_scale;
+                    float by2 = (box_data.second[3] + neg_dh) * inv_scale;
+
+                    res.boxes.emplace_back(bx1, by1, bx2, by2);
+                    res.scores.push_back(cls_scores[nms_idx]);
+                    res.classes.push_back(cls_id);
+                }
             }
+
         }
 
         // 解析输出，拦截一切越界/幽灵数据

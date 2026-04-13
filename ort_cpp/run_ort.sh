@@ -28,8 +28,9 @@ echo "✅ 编译成功！开始运行 YOLO 推理..."
 echo "------------------------------------------------"
 
 # 运行程序
-./build/ort_infer
-./build/ort_infer_batch
+# ./build/ort_infer
+./build/ort_infer_batch --save
+./build/ort_infer_batch_cvnms --save
 
 echo "------------------------------------------------"
 echo "🎉 运行结束！"

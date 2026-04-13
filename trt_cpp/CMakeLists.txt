@@ -28,18 +28,26 @@ set(SOURCES
     src/main.cpp
 )
 
-add_executable(trt_infer ${SOURCES})
+# add_executable(trt_infer ${SOURCES})
 add_executable(trt_infer_batch src/trt_infer_batch.cpp)
+add_executable(trt_infer_batch_cvnms src/trt_infer_batch_cvnms.cpp)
 
 # Link libraries
-target_link_libraries(trt_infer
+# target_link_libraries(trt_infer
+#     ${OpenCV_LIBS}
+#     ${CUDA_LIBRARIES}
+#     nvinfer
+#     nvonnxparser
+#     nvinfer_plugin
+# )
+target_link_libraries(trt_infer_batch
     ${OpenCV_LIBS}
     ${CUDA_LIBRARIES}
     nvinfer
     nvonnxparser
     nvinfer_plugin
 )
-target_link_libraries(trt_infer_batch
+target_link_libraries(trt_infer_batch_cvnms
     ${OpenCV_LIBS}
     ${CUDA_LIBRARIES}
     nvinfer
@@ -48,14 +56,18 @@ target_link_libraries(trt_infer_batch
 )
 
 # Compile options
-target_compile_options(trt_infer PRIVATE -Wall -O3)
+# target_compile_options(trt_infer PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch PRIVATE -Wall -O3)
+target_compile_options(trt_infer_batch_cvnms PRIVATE -Wall -O3)
 
 
 # Set output directory
-set_target_properties(trt_infer PROPERTIES
+# set_target_properties(trt_infer PROPERTIES
+#     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+# )
+set_target_properties(trt_infer_batch PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
-set_target_properties(trt_infer_batch PROPERTIES
+set_target_properties(trt_infer_batch_cvnms PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

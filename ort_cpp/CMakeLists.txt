@@ -36,11 +36,14 @@ message(STATUS "ONNX Runtime 头文件路径: ${ONNXRUNTIME_INCLUDE_DIR}")
 message(STATUS "ONNX Runtime 动态库文件: ${ONNXRUNTIME_LIBRARY}")
 
 # 3. 创建可执行文件
-add_executable(ort_infer ort_infer.cpp)
+# add_executable(ort_infer ort_infer.cpp)
 add_executable(ort_infer_batch ort_infer_batch.cpp)
+add_executable(ort_infer_batch_cvnms ort_infer_batch_cvnms.cpp)
 
 # 4. 链接头文件和库
-target_include_directories(ort_infer PUBLIC ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIR})
-target_link_libraries(ort_infer PUBLIC ${OpenCV_LIBS} ${ONNXRUNTIME_LIBRARY})
+# target_include_directories(ort_infer PUBLIC ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIR})
+# target_link_libraries(ort_infer PUBLIC ${OpenCV_LIBS} ${ONNXRUNTIME_LIBRARY})
 target_include_directories(ort_infer_batch PUBLIC ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIR})
 target_link_libraries(ort_infer_batch PUBLIC ${OpenCV_LIBS} ${ONNXRUNTIME_LIBRARY})
+target_include_directories(ort_infer_batch_cvnms PUBLIC ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIR})
+target_link_libraries(ort_infer_batch_cvnms PUBLIC ${OpenCV_LIBS} ${ONNXRUNTIME_LIBRARY})

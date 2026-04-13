@@ -31,19 +31,6 @@ yolo seg模型导出\
 yolo11n.pt推理\
 `python torch_infer.py --weights weights/yolo11n.pt --source data/1.jpg --img_size 736 1280 --half --save`
 
-### ort infer
-非端到端模型 onnxruntime end2end模型推理(INMSLayer)\
-`python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --end2end --save`
-###
-端到端模型 onnxruntime 模型推理\
-`python ort_infer.py --model weights/yolov10s.onnx --source data/1.jpg --end2end_model --save`
-###
-ultralytics模型 非end2end onnxruntime 推理\
-`python ort_infer.py --model weights/yolo11n.onnx --source data/1.jpg --ultralytics --save`
-###
-其他非ultralytics模型 非end2end onnxruntime 推理\
-`python ort_infer.py --model weights/yolov7-tiny.onnx --source data/1.jpg --save`
-
 ### ort batch infer
 batch_size 支持指定大小的batch进行推理
 非端到端模型 onnxruntime end2end模型推理(INMSLayer)\
@@ -59,8 +46,8 @@ ultralytics模型 非end2end onnxruntime 推理\
 `python ort_infer.py --model weights/yolov7-tiny.onnx --source data/1.jpg --batch_size 8 --save_dir results  --save`
 
 
-### trt infer
-opt_batch_size就是最优的batch推理，max_batch_size就是允许分配最大内存
+### trt batch infer
+opt_batch_size就是最优的batch推理，max_batch_size就是允许分配最大内存, profile测试推理时间
 yolo11n.engine efficient_nms end2end模型推理\
 `python trt_infer.py --engine /home/jia/yolo11n.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
 ###
@@ -135,8 +122,6 @@ fp16\
 `cd ort_cpp`
 编译试运行\
 `./run_ort.sh`
-单帧推理\
-`./build/ort_infer --model xxx --source xxx --save`
 单帧多帧推理\
 `./build/ort_infer_batch --model xxx --source xxx --batch_size xxx --save_dir xxx --save `
 
@@ -145,8 +130,6 @@ fp16\
 编译运行\
 `mkdir build && cd build`
 `cmake .. && make -j8`
-单帧推理\
-`./build/bin/trt_infer --engine xxx --image xxx --save`
 单帧多帧推理\
 `./build/bin/trt_infer_batch --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
 
