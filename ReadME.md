@@ -62,25 +62,25 @@ ultralytics模型 非end2end onnxruntime 推理\
 ### trt infer
 opt_batch_size就是最优的batch推理，max_batch_size就是允许分配最大内存
 yolo11n.engine efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
 ###
 yolo11n.engine end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --end2end`
 ###
 yolo11n.engine 非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolo11n.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --ultralytics`
+`python trt_infer.py --engine /home/jia/yolo11n.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --ultralytics`
 ###
 yolov10s.engine 端到端模型推理\
-`python trt_infer.py --engine /home/jia/yolov10s.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end_model`
+`python trt_infer.py --engine /home/jia/yolov10s.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --end2end_model`
 ###
 其他非ultralytics efficient_nms end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --efficient_end2end`
 ###
 其他非ultralytics end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32 --end2end`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32 --end2end`
 ###
 其他非ultralytics非end2end模型推理\
-`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --image data/1.jpg --output_dir results --opt_batch_size 16 --max_batch_size 32`
+`python trt_infer.py --engine /home/jia/yolov7-tiny.engine --source data/1.jpg --save_dir results --save --opt_batch_size 16 --max_batch_size 32`
 
 
 ### train
@@ -141,7 +141,7 @@ fp16\
 `./build/ort_infer_batch --model xxx --source xxx --batch_size xxx --save_dir xxx --save `
 
 ## run trt infer with cpp
-`cd trt_cpp`
+`cd trt_cpp`\
 编译运行\
 `mkdir build && cd build`
 `cmake .. && make -j8`

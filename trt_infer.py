@@ -24,10 +24,9 @@ class Predictor(BaseEngine):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--engine", help="TRT engine Path")
-    parser.add_argument("-i", "--image", help="image path")
-    parser.add_argument("-d", "--directory", help="directory path")
-    parser.add_argument("-o", "--output_dir", default= "results", help="images output path")
-    parser.add_argument("-v", "--video", help="video path or camera index")
+    parser.add_argument("--source", help="dir image or video data to infer")
+    parser.add_argument("--save", action="store_true", help="whether to save result")
+    parser.add_argument("--save_dir", default="results", help="save directory")
     parser.add_argument("--end2end", default=False, action="store_true", help="use end2end engine")
     parser.add_argument("--efficient_end2end", default=False, action="store_true", help='use efficient_end2end engine')
     parser.add_argument("--conf", type=float, default=0.25, help='object confidence threshold')
@@ -47,11 +46,4 @@ if __name__ == '__main__':
     pred = Predictor(engine_path=args.engine, opt_batch_size=args.opt_batch_size, max_batch_size=args.max_batch_size, conf_thres=args.conf, iou_thres=args.iou)
     pred.get_fps()
 
-    if args.image:
-        pred.inference(args.image, args)
-        
-    if args.video:
-        pred.detect_video(args.video, args)
-    
-    if args.directory:
-        pred.inference(args.directory, args)
+    pred.run(args=args)

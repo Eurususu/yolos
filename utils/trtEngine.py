@@ -220,6 +220,55 @@ class BaseEngine(object):
             return final_outputs, (h2d_ms, compute_ms, d2h_ms)
         
         return final_outputs
+    
+
+    def infer_batch(self, img_list, args):
+        batch_imgs = []
+        batch_ratios = []
+        batch_dwdhs = []
+
+        # 1. 预处理
+        for org_img in img_list:
+            img, ratio, dwdh = letterbox(org_img, self.imgsz)
+            batch_imgs.append(img)
+            batch_ratios.append(ratio)
+            batch_dwdhs.append(dwdh)
+
+        input_tensor = np.vstack(batch_imgs)
+        input_tensor = np.ascontiguousarray(input_tensor)
+
+        # 2. 推理
+        t1 = time.time()
+        infer_result = self.infer(input_tensor, profile=args.profile)
+        t2 = time.time()
+        batch_time_ms = (t2 - t1) * 1000
+
+        if args.profile:
+            data, profile_times = infer_result
+        else:
+            data = infer_result
+            profile_times = None
+        
+        # 3. 后处理
+        batch_res = self.process_output(data, batch_ratios, batch_dwdhs, args)
+        if not isinstance(batch_res, list):
+            batch_res = [batch_res]
+        
+        # 4. 画框
+        res_imgs = []
+        for j, dets in enumerate(batch_res):
+            orig_img = img_list[j].copy()
+            if dets is not None and len(dets) > 0:
+                final_boxes = dets[:, :4]
+                final_scores = dets[:, 4]
+                final_cls_inds = dets[:, 5]
+                # 假设类中已经定义了 self.class_names
+                orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
+                               conf=self.conf_thres, class_names=self.class_names)
+                res_imgs.append(orig_img)
+                
+        return res_imgs, profile_times, batch_time_ms
+
 
     def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):
         boxes = predictions[:, :4]
@@ -540,214 +589,361 @@ class BaseEngine(object):
         #     dets = self.postprocess(predictions, ratio, dwdh=dwdh, ultralytics=args.ultralytics)
 
         # return dets
+    
+    def run(self, args):
+        source = args.source
+        batch_size = args.opt_batch_size
+        save_dir = args.save_dir
 
-    def detect_video(self, video_path, args):
-        cap = cv2.VideoCapture(video_path)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fps_vid = int(round(cap.get(cv2.CAP_PROP_FPS)))
-        if fps_vid == 0: fps_vid = 25
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        name = os.path.basename(video_path)
-        save_dir = args.output_dir
-        os.makedirs(save_dir, exist_ok=True)
-        out = cv2.VideoWriter(os.path.join(save_dir, f"result_{name}"), fourcc, fps_vid, (width, height))
-
-        print(f"开始视频推理，按 opt_batch_size={self.opt_batch_size} 攒批处理。按 'q' 退出...")
-        batch_orig_frames = []
-        batch_imgs = []
-        batch_ratios = []
-        batch_dwdhs = []
-
-        frame_count = 0
-        stop_flag = False
-        is_profile = args.profile
-        # curr_fps = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            img, ratio, dwdh = letterbox(frame, self.imgsz)
-            batch_orig_frames.append(frame)
-            batch_imgs.append(img)
-            batch_ratios.append(ratio)
-            batch_dwdhs.append(dwdh)
-
-            # 当攒够 opt_batch_size 时，执行一次批量推理
-            if len(batch_imgs) == self.opt_batch_size:
-                input_tensor = np.vstack(batch_imgs)
-                input_tensor = np.ascontiguousarray(input_tensor)
-                t1 = time.time()
-                infer_result = self.infer(input_tensor, profile=is_profile)
-                t2 = time.time()
-                if is_profile:
-                    # 分离出 推理数据 和 耗时数据
-                    data, profile_times = infer_result
-                    h2d_ms, compute_ms, d2h_ms = profile_times
-                    
-                    # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
-                    print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
-                else:
-                    data = infer_result
-                batch_time_ms = (t2 - t1) * 1000
-                fps_curr = 1000 / (batch_time_ms / self.opt_batch_size) # 算出单帧等效 FPS
-
-                # 处理当前批次
-                batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
-                if not isinstance(batch_dets, list):
-                    batch_dets = [batch_dets]
-                
-                for j, dets in enumerate(batch_dets):
-                    orig_img = batch_orig_frames[j]
-                    if dets is not None and len(dets) > 0:
-                        final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
-                        orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
-                                       conf=self.conf_thres, class_names=self.class_names)
-                    
-                    cv2.putText(orig_img, f"FPS: {fps_curr:.1f} (Batch: {self.opt_batch_size})", (10, 40), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    
-                    out.write(orig_img)
-                    cv2.imshow('frame', orig_img)
-                    
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        stop_flag = True
-                        break
-                
-                if stop_flag:
-                    break
-                    
-                frame_count += self.opt_batch_size
-                if frame_count % (self.opt_batch_size * 5) == 0:
-                    print(f"已处理 {frame_count} 帧, 最近批次耗时: {batch_time_ms:.1f}ms")
-
-                # 清空缓冲区，迎接下一批
-                batch_orig_frames.clear()
-                batch_imgs.clear()
-                batch_ratios.clear()
-                batch_dwdhs.clear()
-                
-        # 处理视频结尾不够一个 opt_batch_size 的尾巴数据
-        if len(batch_imgs) > 0 and not stop_flag:
-            input_tensor = np.vstack(batch_imgs)
-            input_tensor = np.ascontiguousarray(input_tensor)
-            infer_result = self.infer(input_tensor, profile=is_profile)
-            if is_profile:
-                # 分离出 推理数据 和 耗时数据
-                data, profile_times = infer_result
-                h2d_ms, compute_ms, d2h_ms = profile_times
-                
-                # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
-                print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
-            else:
-                data = infer_result
-            batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
-            if not isinstance(batch_dets, list): batch_dets = [batch_dets]
-
-            for j, dets in enumerate(batch_dets):
-                orig_img = batch_orig_frames[j]
-                if dets is not None and len(dets) > 0:
-                    final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
-                    orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
-                                   conf=self.conf_thres, class_names=self.class_names)
-                out.write(orig_img)
-                cv2.imshow('frame', orig_img)
-                cv2.waitKey(1)
-
-        out.release()
-        cap.release()
-        cv2.destroyAllWindows()
-        print("✅ 视频检测完毕。")
-
-    def inference(self, img_path, args):
-        if os.path.isdir(img_path):
+        if args.save:
+            os.makedirs(save_dir, exist_ok=True)
+        
+        if os.path.isdir(source):
+            # === 模式 1: 目录图片多批次攒帧推理 ===
             valid_exts = {'.jpg', '.png', '.jpeg', '.bmp', '.webp'}
-            img_paths = [os.path.join(img_path, f) for f in os.listdir(img_path) 
+            img_paths = [os.path.join(source, f) for f in os.listdir(source) 
                          if os.path.splitext(f)[-1].lower() in valid_exts]
             img_paths.sort()
-        else:
-            img_paths = [img_path]
-        
-        total_imgs = len(img_paths)
-        if total_imgs == 0:
-            print(f"[警告] 未在 {img_path} 找到支持的图片格式。")
-            return None
-        
-        # 如果是处理目录，或者想看保存结果，创建输出文件夹
-        save_dir = args.output_dir
-        os.makedirs(save_dir, exist_ok=True)
-        is_profile = args.profile
-        print(f"准备推理，共计 {total_imgs} 张图片。使用最优 Batch Size (opt_batch_size): {self.opt_batch_size}")
-        # 2. 按照 opt_batch_size 切片，循环处理每个 Batch
-        for i in range(0, total_imgs, self.opt_batch_size):
-            batch_paths = img_paths[i : i + self.opt_batch_size]
-            batch_imgs = []
-            batch_origs = []
-            batch_ratios = []
-            batch_dwdhs = []
-            batch_names = []
-            # 2.1 逐图读取并预处理
-            for p in batch_paths:
-                orig_img = cv2.imread(p)
-                if orig_img is None:
-                    print(f"[警告] 图片读取失败: {p}")
-                    continue
-                img, ratio, dwdh = letterbox(orig_img, self.imgsz)
-                batch_origs.append(orig_img)      # 保存原始图像用于画框
-                batch_imgs.append(img)            # letterbox 返回的是 (1, C, H, W)
-                batch_ratios.append(ratio)
-                batch_dwdhs.append(dwdh)
-                batch_names.append(os.path.basename(p))
-            if not batch_imgs: continue
 
-            # 2.2 将当前 batch 的图片在第 0 维拼接：多个 (1, C, H, W) -> (real_B, C, H, W)
-            input_tensor = np.vstack(batch_imgs)
-            input_tensor = np.ascontiguousarray(input_tensor)
+            total_imgs = len(img_paths)
+            print(f"找到 {total_imgs} 张图片，按照 opt_batch_size={batch_size} 开始推理...")
 
-            # 3. 执行推理 (TRT 的动态维度会自动接纳真实的 batch 数量)
-            infer_result = self.infer(input_tensor, profile=is_profile)
-            if is_profile:
-                # 分离出 推理数据 和 耗时数据
-                data, profile_times = infer_result
-                h2d_ms, compute_ms, d2h_ms = profile_times
+            for i in range(0, total_imgs, batch_size):
+                batch_paths = img_paths[i : i + batch_size]
+                valid_imgs = []
+                valid_names = []
+
+                for p in batch_paths:
+                    img = cv2.imread(p)
+                    if img is not None:
+                        valid_imgs.append(img)
+                        valid_names.append(os.path.basename(p))
                 
-                # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
-                print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
-            else:
-                data = infer_result
-            # 4. 后处理 (利用我们之前改好的支持多 Batch 的 process_output)
-            batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
+                if not valid_imgs:
+                    continue
+                res_imgs, prof_times, batch_time_ms = self.infer_batch(valid_imgs, args)
 
-            # 兼容性处理：如果 process_output 只有1张图返回的是数组，统一包成 list 方便遍历
-            if not isinstance(batch_dets, list):
-                batch_dets = [batch_dets]
+                if args.profile and prof_times:
+                    print(f"[Profile] H2D: {prof_times[0]:.2f}ms | Compute: {prof_times[1]:.2f}ms | D2H: {prof_times[2]:.2f}ms")
+
+                print(f"已处理进度: {min(i + batch_size, total_imgs)}/{total_imgs} | Batch总耗时: {batch_time_ms:.2f}ms")
+
+                if args.save:
+                    for k, res_img in enumerate(res_imgs):
+                        cv2.imwrite(os.path.join(save_dir, valid_names[k]), res_img)
+            print("✅ 目录处理完成。")
+        else:
+            ext = os.path.splitext(source)[-1].lower()
+            valid_exts = {'.jpg', '.png', '.jpeg', '.bmp', '.webp'}
+
+            if ext in valid_exts:
+                # === 模式 2: 单张图片推理 ===
+                print(f"正在处理图片: {source}")
+                img = cv2.imread(source)
+                if img is None:
+                    print(f"无法读取图片: {source}")
+                    return
+                res_imgs, prof_times, batch_time_ms = self.infer_batch([img], args)
+
+                if args.profile and prof_times:
+                    print(f"[Profile] H2D: {prof_times[0]:.2f}ms | Compute: {prof_times[1]:.2f}ms | D2H: {prof_times[2]:.2f}ms")
+
+                if args.save:
+                    save_path = os.path.join(save_dir, os.path.basename(source))
+                    cv2.imwrite(save_path, res_imgs[0])
+                
+                print(f"推理时间: {batch_time_ms:.2f}ms, 结果已保存")
+            else:
+                # === 模式 3: 视频/RTSP 攒帧加速推理 ===
+                print(f"正在尝试打开视频源: {source}")
+                if source.isdigit():
+                    cap = cv2.VideoCapture(int(source))
+                else:
+                    cap = cv2.VideoCapture(source)
+
+                if not cap.isOpened():
+                    print(f"无法打开视频源: {source}")
+                    return
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps_vid = cap.get(cv2.CAP_PROP_FPS)
+                if fps_vid == 0: fps_vid = 25.0
+
+                out_writer = None
+                is_file = os.path.exists(source)
+                if is_file and args.save:
+                    save_path = os.path.join(save_dir, f"result_{os.path.basename(source)}")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out_writer = cv2.VideoWriter(save_path, fourcc, fps_vid, (width, height))
+                    print(f"视频处理中 (Batch: {batch_size})，结果将保存至: {save_path}")
+                
+                batch_frames = []
+                frame_count = 0
+                stop_flag = False
+
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    batch_frames.append(frame)
+
+                    if len(batch_frames) == batch_size:
+                        res_imgs, prof_times, batch_time_ms = self.infer_batch(batch_frames, args)
+                        fps_curr = 1000.0 / (batch_time_ms / batch_size)
+
+                        if args.profile and prof_times:
+                            print(f"[Profile] H2D: {prof_times[0]:.2f}ms | Comp: {prof_times[1]:.2f}ms | D2H: {prof_times[2]:.2f}ms")
+
+                        for i, res_img in enumerate(res_imgs):
+                            cv2.putText(res_img, f"FPS: {fps_curr:.1f} (Batch: {batch_size})", (10, 40), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                            if out_writer:
+                                out_writer.write(res_img)
+                            
+                            # 兼容参数里没有 no_show 时，使用 getattr 防报错
+                            if not getattr(args, 'no_show', False):
+                                cv2.imshow("TRT Python Inference", res_img)
+                                if cv2.waitKey(1) & 0xFF == ord('q'):
+                                    stop_flag = True
+                                    break
+                        
+                        if stop_flag:
+                            break
+
+                        frame_count += batch_size
+                        if frame_count % (batch_size * 5) == 0:
+                            print(f"已处理 {frame_count} 帧, 最近批次耗时: {batch_time_ms:.1f}ms")
+                        
+                        batch_frames.clear()
+                
+                # 处理尾部不足一个 batch 的残留帧
+                if len(batch_frames) > 0 and not stop_flag:
+                    res_imgs, prof_times, batch_time_ms = self.infer_batch(batch_frames, args)
+                    for i, res_img in enumerate(res_imgs):
+                        if out_writer:
+                            out_writer.write(res_img)
+                        if not getattr(args, 'no_show', False):
+                            cv2.imshow("TRT Python Inference", res_img)
+                            cv2.waitKey(1)
+                
+                cap.release()
+                if out_writer:
+                    out_writer.release()
+                cv2.destroyAllWindows()
+                print("✅ 视频处理完成。")
+
+
+    # def detect_video(self, video_path, args):
+    #     cap = cv2.VideoCapture(video_path)
+    #     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    #     fps_vid = int(round(cap.get(cv2.CAP_PROP_FPS)))
+    #     if fps_vid == 0: fps_vid = 25
+
+    #     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    #     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    #     name = os.path.basename(video_path)
+    #     save_dir = args.output_dir
+    #     os.makedirs(save_dir, exist_ok=True)
+    #     out = cv2.VideoWriter(os.path.join(save_dir, f"result_{name}"), fourcc, fps_vid, (width, height))
+
+    #     print(f"开始视频推理，按 opt_batch_size={self.opt_batch_size} 攒批处理。按 'q' 退出...")
+    #     batch_orig_frames = []
+    #     batch_imgs = []
+    #     batch_ratios = []
+    #     batch_dwdhs = []
+
+    #     frame_count = 0
+    #     stop_flag = False
+    #     is_profile = args.profile
+    #     # curr_fps = 0
+    #     while True:
+    #         ret, frame = cap.read()
+    #         if not ret:
+    #             break
+
+    #         img, ratio, dwdh = letterbox(frame, self.imgsz)
+    #         batch_orig_frames.append(frame)
+    #         batch_imgs.append(img)
+    #         batch_ratios.append(ratio)
+    #         batch_dwdhs.append(dwdh)
+
+    #         # 当攒够 opt_batch_size 时，执行一次批量推理
+    #         if len(batch_imgs) == self.opt_batch_size:
+    #             input_tensor = np.vstack(batch_imgs)
+    #             input_tensor = np.ascontiguousarray(input_tensor)
+    #             t1 = time.time()
+    #             infer_result = self.infer(input_tensor, profile=is_profile)
+    #             t2 = time.time()
+    #             if is_profile:
+    #                 # 分离出 推理数据 和 耗时数据
+    #                 data, profile_times = infer_result
+    #                 h2d_ms, compute_ms, d2h_ms = profile_times
+                    
+    #                 # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+    #                 print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+    #             else:
+    #                 data = infer_result
+    #             batch_time_ms = (t2 - t1) * 1000
+    #             fps_curr = 1000 / (batch_time_ms / self.opt_batch_size) # 算出单帧等效 FPS
+
+    #             # 处理当前批次
+    #             batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
+    #             if not isinstance(batch_dets, list):
+    #                 batch_dets = [batch_dets]
+                
+    #             for j, dets in enumerate(batch_dets):
+    #                 orig_img = batch_orig_frames[j]
+    #                 if dets is not None and len(dets) > 0:
+    #                     final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
+    #                     orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
+    #                                    conf=self.conf_thres, class_names=self.class_names)
+                    
+    #                 cv2.putText(orig_img, f"FPS: {fps_curr:.1f} (Batch: {self.opt_batch_size})", (10, 40), 
+    #                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    
+    #                 out.write(orig_img)
+    #                 cv2.imshow('frame', orig_img)
+                    
+    #                 if cv2.waitKey(1) & 0xFF == ord('q'):
+    #                     stop_flag = True
+    #                     break
+                
+    #             if stop_flag:
+    #                 break
+                    
+    #             frame_count += self.opt_batch_size
+    #             if frame_count % (self.opt_batch_size * 5) == 0:
+    #                 print(f"已处理 {frame_count} 帧, 最近批次耗时: {batch_time_ms:.1f}ms")
+
+    #             # 清空缓冲区，迎接下一批
+    #             batch_orig_frames.clear()
+    #             batch_imgs.clear()
+    #             batch_ratios.clear()
+    #             batch_dwdhs.clear()
+                
+    #     # 处理视频结尾不够一个 opt_batch_size 的尾巴数据
+    #     if len(batch_imgs) > 0 and not stop_flag:
+    #         input_tensor = np.vstack(batch_imgs)
+    #         input_tensor = np.ascontiguousarray(input_tensor)
+    #         infer_result = self.infer(input_tensor, profile=is_profile)
+    #         if is_profile:
+    #             # 分离出 推理数据 和 耗时数据
+    #             data, profile_times = infer_result
+    #             h2d_ms, compute_ms, d2h_ms = profile_times
+                
+    #             # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+    #             print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+    #         else:
+    #             data = infer_result
+    #         batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
+    #         if not isinstance(batch_dets, list): batch_dets = [batch_dets]
+
+    #         for j, dets in enumerate(batch_dets):
+    #             orig_img = batch_orig_frames[j]
+    #             if dets is not None and len(dets) > 0:
+    #                 final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
+    #                 orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
+    #                                conf=self.conf_thres, class_names=self.class_names)
+    #             out.write(orig_img)
+    #             cv2.imshow('frame', orig_img)
+    #             cv2.waitKey(1)
+
+    #     out.release()
+    #     cap.release()
+    #     cv2.destroyAllWindows()
+    #     print("✅ 视频检测完毕。")
+
+    # def inference(self, img_path, args):
+    #     if os.path.isdir(img_path):
+    #         valid_exts = {'.jpg', '.png', '.jpeg', '.bmp', '.webp'}
+    #         img_paths = [os.path.join(img_path, f) for f in os.listdir(img_path) 
+    #                      if os.path.splitext(f)[-1].lower() in valid_exts]
+    #         img_paths.sort()
+    #     else:
+    #         img_paths = [img_path]
+        
+    #     total_imgs = len(img_paths)
+    #     if total_imgs == 0:
+    #         print(f"[警告] 未在 {img_path} 找到支持的图片格式。")
+    #         return None
+        
+    #     # 如果是处理目录，或者想看保存结果，创建输出文件夹
+    #     save_dir = args.output_dir
+    #     os.makedirs(save_dir, exist_ok=True)
+    #     is_profile = args.profile
+    #     print(f"准备推理，共计 {total_imgs} 张图片。使用最优 Batch Size (opt_batch_size): {self.opt_batch_size}")
+    #     # 2. 按照 opt_batch_size 切片，循环处理每个 Batch
+    #     for i in range(0, total_imgs, self.opt_batch_size):
+    #         batch_paths = img_paths[i : i + self.opt_batch_size]
+    #         batch_imgs = []
+    #         batch_origs = []
+    #         batch_ratios = []
+    #         batch_dwdhs = []
+    #         batch_names = []
+    #         # 2.1 逐图读取并预处理
+    #         for p in batch_paths:
+    #             orig_img = cv2.imread(p)
+    #             if orig_img is None:
+    #                 print(f"[警告] 图片读取失败: {p}")
+    #                 continue
+    #             img, ratio, dwdh = letterbox(orig_img, self.imgsz)
+    #             batch_origs.append(orig_img)      # 保存原始图像用于画框
+    #             batch_imgs.append(img)            # letterbox 返回的是 (1, C, H, W)
+    #             batch_ratios.append(ratio)
+    #             batch_dwdhs.append(dwdh)
+    #             batch_names.append(os.path.basename(p))
+    #         if not batch_imgs: continue
+
+    #         # 2.2 将当前 batch 的图片在第 0 维拼接：多个 (1, C, H, W) -> (real_B, C, H, W)
+    #         input_tensor = np.vstack(batch_imgs)
+    #         input_tensor = np.ascontiguousarray(input_tensor)
+
+    #         # 3. 执行推理 (TRT 的动态维度会自动接纳真实的 batch 数量)
+    #         infer_result = self.infer(input_tensor, profile=is_profile)
+    #         if is_profile:
+    #             # 分离出 推理数据 和 耗时数据
+    #             data, profile_times = infer_result
+    #             h2d_ms, compute_ms, d2h_ms = profile_times
+                
+    #             # 既然开启了 profile，顺便在终端打印一下极客视角的耗时细节
+    #             print(f"[Profile] H2D: {h2d_ms:.2f}ms | Compute: {compute_ms:.2f}ms | D2H: {d2h_ms:.2f}ms")
+    #         else:
+    #             data = infer_result
+    #         # 4. 后处理 (利用我们之前改好的支持多 Batch 的 process_output)
+    #         batch_dets = self.process_output(data, batch_ratios, batch_dwdhs, args)
+
+    #         # 兼容性处理：如果 process_output 只有1张图返回的是数组，统一包成 list 方便遍历
+    #         if not isinstance(batch_dets, list):
+    #             batch_dets = [batch_dets]
             
 
-            # 5. 遍历当前 Batch 的每一个结果，画框并保存
-            for j, dets in enumerate(batch_dets):
-                orig_img = batch_origs[j]
+    #         # 5. 遍历当前 Batch 的每一个结果，画框并保存
+    #         for j, dets in enumerate(batch_dets):
+    #             orig_img = batch_origs[j]
                 
-                # 画框
-                if dets is not None and len(dets) > 0:
-                    final_boxes = dets[:, :4]
-                    final_scores = dets[:, 4]
-                    final_cls_inds = dets[:, 5]
+    #             # 画框
+    #             if dets is not None and len(dets) > 0:
+    #                 final_boxes = dets[:, :4]
+    #                 final_scores = dets[:, 4]
+    #                 final_cls_inds = dets[:, 5]
                     
-                    orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
-                                   conf=self.conf_thres, class_names=self.class_names)
+    #                 orig_img = vis(orig_img, final_boxes, final_scores, final_cls_inds,
+    #                                conf=self.conf_thres, class_names=self.class_names)
                 
-                # 保存到输出目录
-                save_path = os.path.join(save_dir, batch_names[j])
-                cv2.imwrite(save_path, orig_img)
+    #             # 保存到输出目录
+    #             save_path = os.path.join(save_dir, batch_names[j])
+    #             cv2.imwrite(save_path, orig_img)
                 
 
-            # 打印进度条
-            print(f"已处理进度: {min(i + self.opt_batch_size, total_imgs)} / {total_imgs}")
+    #         # 打印进度条
+    #         print(f"已处理进度: {min(i + self.opt_batch_size, total_imgs)} / {total_imgs}")
 
-        print(f"✅ 所有图片处理完毕！已保存至目录: {save_dir}/")
-        return None
+    #     print(f"✅ 所有图片处理完毕！已保存至目录: {save_dir}/")
+    #     return None
+
+
 
         # origin_img = cv2.imread(img_path)
         # img, ratio, dwdh = letterbox(origin_img, self.imgsz)
