@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(trt_cpp_infer)
+project(trt_cpp_infer LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,23 +23,22 @@ include_directories(${CUDA_INCLUDE_DIRS})
 
 # Source files
 set(SOURCES
-    src/trt_engine.cpp
-    src/trt_utils.cpp
-    src/main.cpp
+    src/trt_utils.cu
+    src/trt_infer_batch_cuda.cpp
 )
 
-# add_executable(trt_infer ${SOURCES})
+add_executable(trt_infer_batch_cuda ${SOURCES})
 add_executable(trt_infer_batch src/trt_infer_batch.cpp)
 add_executable(trt_infer_batch_cvnms src/trt_infer_batch_cvnms.cpp)
 
 # Link libraries
-# target_link_libraries(trt_infer
-#     ${OpenCV_LIBS}
-#     ${CUDA_LIBRARIES}
-#     nvinfer
-#     nvonnxparser
-#     nvinfer_plugin
-# )
+target_link_libraries(trt_infer_batch_cuda
+    ${OpenCV_LIBS}
+    ${CUDA_LIBRARIES}
+    nvinfer
+    nvonnxparser
+    nvinfer_plugin
+)
 target_link_libraries(trt_infer_batch
     ${OpenCV_LIBS}
     ${CUDA_LIBRARIES}
@@ -56,15 +55,15 @@ target_link_libraries(trt_infer_batch_cvnms
 )
 
 # Compile options
-# target_compile_options(trt_infer PRIVATE -Wall -O3)
+target_compile_options(trt_infer_batch_cuda PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch_cvnms PRIVATE -Wall -O3)
 
 
 # Set output directory
-# set_target_properties(trt_infer PROPERTIES
-#     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-# )
+set_target_properties(trt_infer_batch_cuda PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
 set_target_properties(trt_infer_batch PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
