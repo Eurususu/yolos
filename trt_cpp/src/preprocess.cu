@@ -1,9 +1,9 @@
-#include "trt_utils.h"
+#include "preprocess.h"
 #include <iostream>
 
 
 __global__ void preprocess_kernel(
-    const uint8_t** src_imgs, // 【升级】：指针的指针，指向当前 batch 每个图像的独立显存地址
+    const uint8_t** src_imgs, // 指针的指针，指向当前 batch 每个图像的独立显存地址
     float* dst_blob,          // 输出的 NCHW 张量 (TensorRT input)
     const int* src_widths,    // 每个图像的宽
     const int* src_heights,   // 每个图像的高
@@ -159,6 +159,7 @@ void launch_preprocess_cuda(
     cudaStreamSynchronize(stream);
 
     // 释放临时元数据显存...
+    // 彻底销毁/归还 显存
     cudaFreeAsync(d_image_widths, stream);
     cudaFreeAsync(d_image_heights, stream);
 

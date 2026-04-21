@@ -297,7 +297,10 @@ class YOLO_ONNX_Runner:
             for box, score, cls_id in zip(det_boxes, det_scores, det_classes):
                 x1, y1, x2, y2 = box
                 w, h = x2 - x1, y2 - y1
-                coco_cat_id = self.coco_id_mapping[int(cls_id)]
+                if args.use_coco_map:
+                    coco_cat_id = self.coco_id_mapping[int(cls_id)]
+                else:
+                    coco_cat_id = int(cls_id)
 
                 results.append({
                     "image_id": img_id,
@@ -332,9 +335,11 @@ if __name__ == "__main__":
     parser.add_argument("--val", action="store_true", help="Run in validation mode to compute mAP")
     parser.add_argument("--val_dir", type=str, default='/home/jia/dataset/coco2017/images/val2017', help="Path to COCO val images directory")
     parser.add_argument("--val_json", type=str, default='/home/jia/dataset/coco2017/annotations/instances_val2017.json', help="Path to COCO val annotations json")
+    parser.add_argument("--use_coco_map", action="store_true", help="Map class 0-79 to COCO 1-90")
 
     # FPS测试
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark to measure FPS")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for benchmarking")
 
     args = parser.parse_args()
 
@@ -353,4 +358,4 @@ if __name__ == "__main__":
         if dummy_img is None:
             dummy_img = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
 
-        runner.benchmark(dummy_img, batch_size=16, num_warmup=50, num_runs=200)
+        runner.benchmark(dummy_img, batch_size=args.batch_size, num_warmup=50, num_runs=200)

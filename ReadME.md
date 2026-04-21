@@ -129,7 +129,7 @@ fp16\
 `cd trt_cpp`\
 编译运行\
 `mkdir build && cd build`
-`cmake .. && make -j8`
+`cmake .. && make -j8`\
 单帧多帧推理\
 `./build/bin/trt_infer_batch --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
 cuda核函数前处理 单帧多帧推理\

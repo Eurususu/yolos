@@ -693,7 +693,9 @@ class YoloTRTRunner {
             std::vector<int> dws, dhs;
 
             // 1. 预处理
+            auto t_pre_start = std::chrono::high_resolution_clock::now();
             cv::Mat blob = preprocess_batch(img_list, scales, dws, dhs);
+            auto t_pre_end = std::chrono::high_resolution_clock::now();
 
             cudaEvent_t event_start, event_h2d, event_comp, event_d2h;
             if (args.profile){
@@ -762,17 +764,24 @@ class YoloTRTRunner {
 
             cudaStreamSynchronize(stream);
 
-            std::vector<float> prof_times(3, 0.0f);
+            std::vector<float> prof_times(5, 0.0f);
             if (args.profile) {
-                cudaEventElapsedTime(&prof_times[0], event_start, event_h2d);
-                cudaEventElapsedTime(&prof_times[1], event_h2d, event_comp);
-                cudaEventElapsedTime(&prof_times[2], event_comp, event_d2h);
+                cudaEventElapsedTime(&prof_times[1], event_start, event_h2d);
+                cudaEventElapsedTime(&prof_times[2], event_h2d, event_comp);
+                cudaEventElapsedTime(&prof_times[3], event_comp, event_d2h);
                 cudaEventDestroy(event_start); cudaEventDestroy(event_h2d);
                 cudaEventDestroy(event_comp);  cudaEventDestroy(event_d2h);
             }
 
             // 5. 后处理
+            auto t_post_start = std::chrono::high_resolution_clock::now();
             std::vector<BatchResult> batch_dets = process_output(args, real_batch_size, scales, dws, dhs);
+            auto t_post_end = std::chrono::high_resolution_clock::now();
+
+            if (args.profile) {
+                prof_times[0] = std::chrono::duration<float, std::milli>(t_pre_end - t_pre_start).count();
+                prof_times[4] = std::chrono::duration<float, std::milli>(t_post_end - t_post_start).count();
+            }
 
             // 6. 画框
             std::vector<cv::Mat> result_imgs;
@@ -829,8 +838,12 @@ class YoloTRTRunner {
                     double t = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
 
+                    // if (args.profile){
+                    //     printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    // }
                     if (args.profile){
-                        printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                        printf("Preprocess:%.2fms | [Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms\n", 
+                        prof[0], prof[1], prof[2], prof[3], prof[4]);
                     }
                     std::cout << "已处理进度: " << std::min(i + batch_size, img_paths.size()) << "/" << img_paths.size()
                             << " | Batch总耗时: " << std::fixed << std::setprecision(2) << t << "ms\n";
@@ -858,7 +871,11 @@ class YoloTRTRunner {
                     auto t2 = std::chrono::high_resolution_clock::now();
                     double t = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-                    if (args.profile) printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    // if (args.profile) printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    if (args.profile){
+                        printf("Preprocess:%.2fms | [Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms\n", 
+                        prof[0], prof[1], prof[2], prof[3], prof[4]);
+                    }
                     if (args.save) cv::imwrite((fs::path(save_dir)/fs::path(source).filename()).string(), res_imgs[0]);
                     std::cout << "推理时间: " << t << "ms, 结果已保存\n";
                 }
@@ -899,8 +916,12 @@ class YoloTRTRunner {
                             double batch_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
                             double fps_curr = 1000.0 / (batch_time / batch_size);
 
-                            if (args.profile) {
-                                printf("[Profile] H2D: %.2fms | Comp: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                            // if (args.profile) {
+                            //     printf("[Profile] H2D: %.2fms | Comp: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                            // }
+                            if (args.profile){
+                                printf("Preprocess:%.2fms | [Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms\n", 
+                                prof[0], prof[1], prof[2], prof[3], prof[4]);
                             }
 
                             for (size_t i = 0; i < res_imgs.size(); i++){

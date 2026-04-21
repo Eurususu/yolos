@@ -23,7 +23,7 @@ include_directories(${CUDA_INCLUDE_DIRS})
 
 # Source files
 set(SOURCES
-    src/trt_utils.cu
+    src/preprocess.cu
     src/trt_infer_batch_cuda.cpp
 )
 

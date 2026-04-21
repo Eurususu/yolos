@@ -11,7 +11,8 @@
 #include <cuda_runtime_api.h>
 #include <NvInferPlugin.h>
 #include <numeric>
-#include "trt_utils.h"
+#include "preprocess.h"
+#include "NMSProcessor.h"
 
 namespace fs = std::filesystem;
 
@@ -593,10 +594,10 @@ class YoloTRTRunner {
             // 1. 预处理
             // cv::Mat blob = preprocess_batch(img_list, scales, dws, dhs);
 
-            cudaEvent_t event_start, event_h2d, event_comp, event_d2h;
+            cudaEvent_t event_start, event_h2d_preprocess, event_comp, event_d2h;
             if (args.profile){
                 cudaEventCreate(&event_start);
-                cudaEventCreate(&event_h2d);
+                cudaEventCreate(&event_h2d_preprocess);
                 cudaEventCreate(&event_comp);
                 cudaEventCreate(&event_d2h);
                 cudaEventRecord(event_start, stream);
@@ -620,6 +621,8 @@ class YoloTRTRunner {
                 }
             }
             float* trt_input_ptr = static_cast<float*>(input_tensor->dev_ptr);
+
+            // --- 2. 动态维护原图显存池 (懒加载机制) ---
             int max_current_bytes = 0;
             std::vector<cv::Mat> continuous_imgs;
             continuous_imgs.reserve(real_batch_size);
@@ -640,6 +643,8 @@ class YoloTRTRunner {
             }
 
             // 如果遇到比以前更大的图，扩容 GPU 显存池
+            // 如果是比之前小或者一样的图片，则不需要再次分配显存，因为现在的显存足够大了
+            // 因为分配大块显存极其耗时，我们要尽可能白嫖已经开辟好的大空间。
             if (max_current_bytes > max_src_bytes) {
                 for (auto ptr : d_img_buffers) { if(ptr) cudaFree(ptr); }
                 for (int i = 0; i < max_batch_size; i++) {
@@ -647,6 +652,7 @@ class YoloTRTRunner {
                 }
                 max_src_bytes = max_current_bytes;
             }
+            // d_img_buffers 存在显存复用， 做到零显存分配
             launch_preprocess_cuda(
                 continuous_imgs,
                 trt_input_ptr,
@@ -657,10 +663,9 @@ class YoloTRTRunner {
                 stream
             );
 
-            // --- 2. 动态维护原图显存池 (懒加载机制) ---
 
 
-            if (args.profile) cudaEventRecord(event_h2d, stream);
+            if (args.profile) cudaEventRecord(event_h2d_preprocess, stream);
 
             // 3. infer(V3接口)
             context->enqueueV3(stream);
@@ -703,24 +708,36 @@ class YoloTRTRunner {
 
             cudaStreamSynchronize(stream);
 
-            std::vector<float> prof_times(3, 0.0f);
+            std::vector<float> prof_times(5, 0.0f);
             if (args.profile) {
-                cudaEventElapsedTime(&prof_times[0], event_start, event_h2d);
-                cudaEventElapsedTime(&prof_times[1], event_h2d, event_comp);
+                cudaEventElapsedTime(&prof_times[0], event_start, event_h2d_preprocess);
+                cudaEventElapsedTime(&prof_times[1], event_h2d_preprocess, event_comp);
                 cudaEventElapsedTime(&prof_times[2], event_comp, event_d2h);
-                cudaEventDestroy(event_start); cudaEventDestroy(event_h2d);
+                cudaEventDestroy(event_start); cudaEventDestroy(event_h2d_preprocess);
                 cudaEventDestroy(event_comp);  cudaEventDestroy(event_d2h);
             }
 
             // 5. 后处理
+            auto t_post_start = std::chrono::high_resolution_clock::now();
             std::vector<BatchResult> batch_dets = process_output(args, real_batch_size, scales, dws, dhs);
+            auto t_post_end = std::chrono::high_resolution_clock::now();
+
+            if (args.profile) {
+                // 计算后处理耗时存入 prof_times[3]
+                prof_times[3] = std::chrono::duration<float, std::milli>(t_post_end - t_post_start).count();
+            }
 
             // 6. 画框
+            auto t_draw_start = std::chrono::high_resolution_clock::now();
             std::vector<cv::Mat> result_imgs;
             for (int i = 0; i < real_batch_size; i++) {
                 cv::Mat img = img_list[i].clone();
                 draw_results(img, batch_dets[i]);
                 result_imgs.push_back(img);
+            }
+            auto t_draw_end = std::chrono::high_resolution_clock::now();
+            if (args.profile) {
+                prof_times[4] = std::chrono::duration<float, std::milli>(t_draw_end - t_draw_start).count();
             }
 
             return {result_imgs, prof_times};
@@ -770,8 +787,12 @@ class YoloTRTRunner {
                     double t = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
 
+                    // if (args.profile){
+                    //     printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    // }
                     if (args.profile){
-                        printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                        printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms | Draw: %.2fms\n", 
+                        prof[0], prof[1], prof[2], prof[3], prof[4]);
                     }
                     std::cout << "已处理进度: " << std::min(i + batch_size, img_paths.size()) << "/" << img_paths.size()
                             << " | Batch总耗时: " << std::fixed << std::setprecision(2) << t << "ms\n";
@@ -799,7 +820,11 @@ class YoloTRTRunner {
                     auto t2 = std::chrono::high_resolution_clock::now();
                     double t = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-                    if (args.profile) printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    // if (args.profile) printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    if (args.profile){
+                        printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms | Draw: %.2fms\n", 
+                        prof[0], prof[1], prof[2], prof[3], prof[4]);
+                    }
                     if (args.save) cv::imwrite((fs::path(save_dir)/fs::path(source).filename()).string(), res_imgs[0]);
                     std::cout << "推理时间: " << t << "ms, 结果已保存\n";
                 }
@@ -840,8 +865,12 @@ class YoloTRTRunner {
                             double batch_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
                             double fps_curr = 1000.0 / (batch_time / batch_size);
 
-                            if (args.profile) {
-                                printf("[Profile] H2D: %.2fms | Comp: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                            // if (args.profile) {
+                            //     printf("[Profile] H2D: %.2fms | Comp: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                            // }
+                            if (args.profile){
+                                printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms | Draw: %.2fms\n", 
+                                prof[0], prof[1], prof[2], prof[3], prof[4]);
                             }
 
                             for (size_t i = 0; i < res_imgs.size(); i++){

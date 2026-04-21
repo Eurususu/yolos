@@ -20,7 +20,7 @@ from utils.trtEngine import letterbox
 
 class Validator(BaseEngine):
     def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.65, max_batch_size=32):
-        super(Validator, self).__init__(engine_path)
+        super(Validator, self).__init__(engine_path, max_batch_size)
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.n_classes = 80
@@ -281,4 +281,4 @@ if __name__ == "__main__":
         val.run_validate(args)
         
     if args.benchmark:
-        val.benchmark(img_path=args.source, batch_size=args.batch_size, num_warmup=20, num_runs=10)
+        val.benchmark(img_path=args.source, batch_size=args.batch_size, num_warmup=20, num_runs=200)
