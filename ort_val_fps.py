@@ -393,6 +393,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_dir", type=str, default='/home/jia/dataset/coco2017/images/val2017', help="Path to COCO val images directory")
     parser.add_argument("--val_json", type=str, default='/home/jia/dataset/coco2017/annotations/instances_val2017.json', help="Path to COCO val annotations json")
     parser.add_argument("--use_coco_map", action="store_true", help="Map class 0-79 to COCO 1-90")
+    parser.add_argument("--num_classes", type=int, default=80, help="Number of classes in the model")
 
     # FPS测试
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark to measure FPS")
@@ -405,7 +406,7 @@ if __name__ == "__main__":
 
     # 注意：验证模式下，强制降低置信度阈值
     conf_thres = 0.001 if args.val else 0.4
-    runner = YOLO_ONNX_Runner(args.model, confidence_thres=conf_thres)
+    runner = YOLO_ONNX_Runner(args.model, confidence_thres=conf_thres, num_classes=args.num_classes)
 
     if args.val:
         runner.validate_coco(args.val_dir, args.val_json, args)

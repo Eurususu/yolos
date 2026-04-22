@@ -22,7 +22,12 @@ find_package(CUDA REQUIRED)
 include_directories(${CUDA_INCLUDE_DIRS})
 
 # Source files
+# file(GLOB CU_SOURCES "src/*.cu")
+# file(GLOB CUH_SOURCES "src/*.cuh")
 set(SOURCES
+    src/efficientNMSInference.cu
+    # src/efficientNMSInference.cuh
+    src/NMSProcessor.cu
     src/preprocess.cu
     src/trt_infer_batch_cuda.cpp
 )

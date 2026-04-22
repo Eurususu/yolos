@@ -19,11 +19,12 @@ from utils.trtEngine import letterbox
 
 
 class Validator(BaseEngine):
-    def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.65, max_batch_size=32):
-        super(Validator, self).__init__(engine_path, max_batch_size)
+    def __init__(self, engine_path, conf_thres=0.25, iou_thres=0.65, max_batch_size=32, num_classes=80):
+        super(Validator, self).__init__(engine_path=engine_path, conf_thres=conf_thres, iou_thres=iou_thres,
+                                        max_batch_size=max_batch_size, num_classes=num_classes)
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
-        self.n_classes = 80
+        self.n_classes = num_classes
         self.max_batch_size = max_batch_size
 
     def postprocess(self, predictions, ratio, dwdh=None, ultralytics=False):

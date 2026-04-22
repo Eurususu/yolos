@@ -437,10 +437,11 @@ if __name__ == "__main__":
     parser.add_argument("--save", action="store_true", help="Save output to file")
     parser.add_argument("--save_dir", type=str, default='results', help="Directory to save results")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--num_classes", type=int, default=80, help="Number of classes")
     args = parser.parse_args()
     
     if args.end2end and args.end2end_model:
         raise NotImplementedError("end2end and end2end_model cannot be used simultaneously.")
         
-    runner = YOLO_ONNX_Runner(args.model, confidence_thres=args.conf)
+    runner = YOLO_ONNX_Runner(args.model, confidence_thres=args.conf, num_classes=args.num_classes)
     runner.run(args)

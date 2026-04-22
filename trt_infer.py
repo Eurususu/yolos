@@ -7,9 +7,10 @@ import cv2
 
 
 class Predictor(BaseEngine):
-    def __init__(self, engine_path, opt_batch_size=16, max_batch_size=32, conf_thres=0.25, iou_thres=0.7):
-        super(Predictor, self).__init__(engine_path, opt_batch_size=opt_batch_size, max_batch_size=max_batch_size, conf_thres=conf_thres, iou_thres=iou_thres)
-        self.n_classes = 80
+    def __init__(self, engine_path, opt_batch_size=16, max_batch_size=32, conf_thres=0.25, iou_thres=0.7, num_classes=80):
+        super(Predictor, self).__init__(engine_path=engine_path, opt_batch_size=opt_batch_size, max_batch_size=max_batch_size, 
+                                        conf_thres=conf_thres, iou_thres=iou_thres, num_classes=num_classes)
+        self.n_classes = num_classes
         self.class_names = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
          'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
          'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
@@ -37,6 +38,7 @@ if __name__ == '__main__':
     parser.add_argument("--max_batch_size", type=int, default=32, help="the max batch size supported by the engine")
     parser.add_argument("--profile", default=False, action="store_true", help="whether to profile the model")
     parser.add_argument("--no_show", action="store_true", help="do not diaplay the result image")
+    parser.add_argument("--num_classes", type=int, default=80, help="number of classes")
 
     args = parser.parse_args()
     print(args)
@@ -44,7 +46,7 @@ if __name__ == '__main__':
     if args.end2end and args.end2end_model:
         raise NotImplementedError("end2end model is already End2End.")
 
-    pred = Predictor(engine_path=args.engine, opt_batch_size=args.opt_batch_size, max_batch_size=args.max_batch_size, conf_thres=args.conf, iou_thres=args.iou)
+    pred = Predictor(engine_path=args.engine, opt_batch_size=args.opt_batch_size, max_batch_size=args.max_batch_size, conf_thres=args.conf, iou_thres=args.iou, num_classes=args.num_classes)
     pred.get_fps()
 
     pred.run(args=args)

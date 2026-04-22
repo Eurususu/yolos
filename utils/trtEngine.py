@@ -11,10 +11,10 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
 class BaseEngine(object):
-    def __init__(self, engine_path, max_batch_size=32, opt_batch_size=None, max_det=300, conf_thres=0.25, iou_thres=0.7):
+    def __init__(self, engine_path, max_batch_size=32, opt_batch_size=None, max_det=300, conf_thres=0.25, iou_thres=0.7, num_classes=80):
         self.mean = None
         self.std = None
-        self.n_classes = 80
+        self.n_classes = num_classes
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.max_batch_size = max_batch_size

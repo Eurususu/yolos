@@ -1,4 +1,6 @@
 #include "NMSProcessor.h"
+#include "efficientNMSInference.cuh"
+#include <cstdio>
 
 template <typename T>
 __global__ void YOLODecodeKernel(

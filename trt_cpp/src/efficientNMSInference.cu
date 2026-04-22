@@ -30,7 +30,7 @@
 #include "cub/cub.cuh"
 #include "cuda_runtime_api.h"
 
-#include "efficientNMSInference.cuh"
+#include "../include/efficientNMSInference.cuh"
 #include "../include/efficientNMS.h"
 
 // ============================================================================
