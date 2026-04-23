@@ -611,7 +611,7 @@ cudaError_t EfficientNMSFilterLauncher(EfficientNMSParams& param, const T* score
     const dim3 blockSize = {elementsPerBlock, imagesPerBlock, 1};
     const dim3 gridSize = {elementBlocks, imageBlocks, 1};
 
-    float kernelSelectThreshold = 0.007f;
+    float kernelSelectThreshold = -0.1f;
     if (param.scoreSigmoid)
     {
         // Inverse Sigmoid

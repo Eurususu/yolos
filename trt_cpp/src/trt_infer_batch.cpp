@@ -15,6 +15,35 @@
 
 namespace fs = std::filesystem;
 
+// CUDA 锁页内存分配器
+template <typename T>
+struct CudaPinnedAllocator {
+    using value_type = T;
+
+    CudaPinnedAllocator() = default;
+    template <class U> constexpr CudaPinnedAllocator(const CudaPinnedAllocator<U>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        T* ptr = nullptr;
+        cudaError_t err = cudaMallocHost((void**)&ptr, n * sizeof(T));
+        if (err != cudaSuccess) {
+            throw std::bad_alloc();
+        }
+        return ptr;
+    }
+
+    void deallocate(T* p, std::size_t /*n*/) noexcept {
+        cudaFreeHost(p);
+    }
+};
+
+template <class T, class U>
+bool operator==(const CudaPinnedAllocator<T>&, const CudaPinnedAllocator<U>&) { return true; }
+template <class T, class U>
+bool operator!=(const CudaPinnedAllocator<T>&, const CudaPinnedAllocator<U>&) { return false; }
+template <typename T>
+using PinnedVector = std::vector<T, CudaPinnedAllocator<T>>;
+
 
 struct Args {
     std::string engine = "../weights/yolov7-tiny.engine";
@@ -86,7 +115,8 @@ struct TensorInfo {
     std::vector<int64_t> actual_shape;  // 推理后得到的真实形状
     size_t size_bytes;                  // 显存分配大小
     void* dev_ptr = nullptr;            // GPU 指针
-    std::vector<float> host_buffer;     // CPU 接收缓存 (仅输出需要)
+    // std::vector<float, CudaPinnedAllocator<float>> host_buffer;     // CPU 接收缓存 (仅输出需要)
+    PinnedVector<float> host_buffer;    // host_buffer 改成锁页内存
 };
 
 
@@ -103,11 +133,15 @@ class YoloTRTRunner {
         std::unique_ptr<nvinfer1::IRuntime, TRTDeleter> runtime;
         std::unique_ptr<nvinfer1::ICudaEngine, TRTDeleter> engine;
         std::unique_ptr<nvinfer1::IExecutionContext, TRTDeleter> context;
-        cudaStream_t stream;
+        cudaStream_t stream = nullptr;
 
         std::vector<TensorInfo> io_tensors;
         int input_width;
         int input_height;
+        int input_channels;
+
+        cudaEvent_t event_start = nullptr, event_h2d = nullptr, event_comp = nullptr, event_d2h = nullptr;
+        bool profile = false;
 
         static float box_iou(const cv::Vec4f& a, const cv::Vec4f& b){
             float x1 = std::max(a[0], b[0]);
@@ -170,15 +204,108 @@ class YoloTRTRunner {
                 }
             }
             return keep;
+        }
 
+        static std::vector<int> optimized_nms(const std::vector<cv::Vec4f>& boxes,
+                                      const std::vector<float>& scores,
+                                      const std::vector<int>& classes,
+                                      float nms_threshold) {
+            if (scores.empty()) return {};
+
+            int n = scores.size();
+            
+            // 1. 预计算所有框的面积，避免在双重循环中重复计算
+            std::vector<float> areas(n);
+            for (int i = 0; i < n; ++i) {
+                areas[i] = std::max(0.0f, boxes[i][2] - boxes[i][0]) * std::max(0.0f, boxes[i][3] - boxes[i][1]);
+            }
+
+            // 初始化索引数组
+            std::vector<int> indices(n);
+            std::iota(indices.begin(), indices.end(), 0);
+
+            // 联合排序：按类别升序，类别相同时按分数降序
+            std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+                if (classes[a] != classes[b]) {
+                    return classes[a] < classes[b];
+                }
+                return scores[a] > scores[b];
+            });
+
+            std::vector<int> keep;
+            keep.reserve(n / 2); // 预留空间减少扩容开销
+            std::vector<uint8_t> suppressed(n, 0);
+
+            for (int i = 0; i < n; i++) {
+                int idx_i = indices[i];
+                if (suppressed[idx_i]) continue;
+
+                keep.push_back(idx_i);
+
+                // 缓存外层框的边界和面积，避免在内层循环中反复访问指针/数组
+                const auto& box_i = boxes[idx_i];
+                float i_x1 = box_i[0];
+                float i_y1 = box_i[1];
+                float i_x2 = box_i[2];
+                float i_y2 = box_i[3];
+                float i_area = areas[idx_i];
+
+                for (int j = i + 1; j < n; j++) {
+                    int idx_j = indices[j];
+                    
+                    // 类别不同，直接跳出内层循环
+                    if (classes[idx_i] != classes[idx_j]) break;
+                    
+                    if (suppressed[idx_j]) continue;
+
+                    const auto& box_j = boxes[idx_j];
+
+                    // 2. 快速排斥测试 (AABB 碰撞检测)
+                    // 直接计算相交矩形的坐标，如果不相交，坐标必定会出现异常大小关系
+                    float inter_x1 = std::max(i_x1, box_j[0]);
+                    float inter_y1 = std::max(i_y1, box_j[1]);
+                    float inter_x2 = std::min(i_x2, box_j[2]);
+                    float inter_y2 = std::min(i_y2, box_j[3]);
+
+                    // 如果不相交，直接跳过后续昂贵的计算 (跳过了减法、乘法和除法)
+                    if (inter_x1 >= inter_x2 || inter_y1 >= inter_y2) {
+                        continue;
+                    }
+
+                    // 3. 计算 IoU
+                    float inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1);
+                    // 此时不需要再加上 max(0.0f, xxx)，因为前面已经拦截了不相交的情况
+                    float union_area = i_area + areas[idx_j] - inter_area;
+                    
+                    if (union_area > 0.0f && (inter_area / union_area) > nms_threshold) {
+                        suppressed[idx_j] = 1;
+                    }
+                }
+            }
+            return keep;
+        }
+
+        void cleanup() {
+            for (auto& t : io_tensors) {
+                if(t.dev_ptr) { cudaFree(t.dev_ptr); t.dev_ptr = nullptr; }
+            }
+
+            if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
+
+            if (profile) {
+                if (event_start) { cudaEventDestroy(event_start); event_start = nullptr; }
+                if (event_h2d) { cudaEventDestroy(event_h2d); event_h2d = nullptr; }
+                if (event_comp) { cudaEventDestroy(event_comp); event_comp = nullptr; }
+                if (event_d2h) { cudaEventDestroy(event_d2h); event_d2h = nullptr; }
+            }
         }
 
     public:
         YoloTRTRunner(const std::string& engine_path, int max_batch = 32, int opt_batch = 16, 
-            int max_det = 300, float conf = 0.25f, float iou = 0.7f, int cls = 80, const std::vector<std::string>& class_names = COCO_NAMES)
-            : conf_thres(conf), iou_thres(iou), num_classes(cls), class_names(class_names), max_batch_size(max_batch), max_det(max_det){
+            int max_det = 300, float conf = 0.25f, float iou = 0.7f, bool profile = false, int cls = 80, const std::vector<std::string>& class_names = COCO_NAMES)
+            : conf_thres(conf), iou_thres(iou), profile(profile), num_classes(cls), class_names(class_names), max_batch_size(max_batch), max_det(max_det){
                 opt_batch_size = (opt_batch > 0) ? opt_batch : max_batch_size;
-
+            try{
                 if (this->class_names.size() != static_cast<size_t>(this->num_classes)){
                     std::cerr << "[警告] 传入的类别名称数量 (" << this->class_names.size() 
                             << ") 不等于 num_classes (" << this->num_classes << ")! 画框时可能会越界。" << std::endl;
@@ -212,6 +339,13 @@ class YoloTRTRunner {
 
                 cudaStreamCreate(&stream);
 
+                if (profile){
+                    cudaEventCreate(&event_start);
+                    cudaEventCreate(&event_h2d);
+                    cudaEventCreate(&event_comp);
+                    cudaEventCreate(&event_d2h);
+                }
+
                 // 3. 动态显存分配
                 int num_io_tensors = engine->getNbIOTensors();
                 for (int i = 0; i < num_io_tensors; ++i){
@@ -226,7 +360,7 @@ class YoloTRTRunner {
                             max_batch_size = shape[0];
                             if (opt_batch <= 0) opt_batch_size = shape[0];
                         }
-                        
+                        input_channels = shape[1];
                         input_height = shape[2];
                         input_width = shape[3];
 
@@ -275,14 +409,21 @@ class YoloTRTRunner {
                     io_tensors.push_back(info);
 
                 }
+            } catch (const std::exception& e){
+                // 💥 捕获到异常：立刻召唤 cleanup 打扫战场，然后再把异常往外抛！
+                std::cerr << "\n[致命错误] YoloTRTRunner 初始化失败: " << e.what() << std::endl;
+                std::cerr << "正在安全释放已分配的显存资源...\n";
+                cleanup();
+                throw; // 继续抛出，阻止程序运行
+            } catch (...) {
+                std::cerr << "\n[致命错误] YoloTRTRunner 运行时发生未知异常！\n";
+                cleanup();
+                throw; // 继续抛出，阻止程序运行
+            }
         }
         
         ~YoloTRTRunner(){
-            for (auto& t : io_tensors){
-                if(t.dev_ptr) cudaFree(t.dev_ptr);
-            }
-
-            if (stream) cudaStreamDestroy(stream);
+            cleanup();
         }
 
         // 零拷贝预处理：返回 blob (cv::Mat 保证了底层的连续内存)
@@ -450,7 +591,7 @@ class YoloTRTRunner {
                 cv::Mat transposed_mat;
                 cv::transpose(out_mat, transposed_mat);
                 
-                const float* t_data = (const float*)transposed_mat.data;
+                const float* t_data = reinterpret_cast<const float*>(transposed_mat.data);
                 for (int i = 0; i < num_anchors; i++) {
                     const float* row = t_data + i * channels;
                     float cx = row[0], cy = row[1], w = row[2], h = row[3];
@@ -498,7 +639,7 @@ class YoloTRTRunner {
             // -------------------------------------------------------------
 
             // 调用我们的静态 NMS，获取最终需要保留的框的索引
-            std::vector<int> keep_indices = nms(all_boxes, all_scores, all_classes, iou_thres);
+            std::vector<int> keep_indices = optimized_nms(all_boxes, all_scores, all_classes, iou_thres);
 
             // 计算缩放和平移还原系数
             float inv_scale = 1.f / scale;
@@ -524,6 +665,12 @@ class YoloTRTRunner {
         std::vector<BatchResult> process_output(const Args& args, int real_batch_size, const std::vector<float>& scales, 
             const std::vector<int>& dws, const std::vector<int>& dhs){
             std::vector<BatchResult> batch_dets(real_batch_size);
+
+            for (int b = 0; b < real_batch_size; b++) {
+                batch_dets[b].boxes.reserve(100);
+                batch_dets[b].scores.reserve(100);
+                batch_dets[b].classes.reserve(100);
+            }
             
             // 收集所有的输出 Tensor
             std::vector<TensorInfo*> outputs;
@@ -561,6 +708,10 @@ class YoloTRTRunner {
                 for (int b = 0; b < real_batch_size; b++){
                     // 读取当前帧有效框的数量
                     int valid_count = get_int_val(t_num, b);
+
+                    batch_dets[b].boxes.reserve(valid_count);
+                    batch_dets[b].scores.reserve(valid_count);
+                    batch_dets[b].classes.reserve(valid_count);
 
                     for (int i =0; i < valid_count; i++){
                         float score = scores_ptr[b * max_det + i];
@@ -678,11 +829,14 @@ class YoloTRTRunner {
 
                 char score_str[8];
                 snprintf(score_str, sizeof(score_str), "%.2f", score);
-                std::string label = (cls_id < (int)class_names.size() ? class_names[cls_id] : std::to_string(cls_id)) + ": " + score_str;
+                // std::string label = (cls_id < (int)class_names.size() ? class_names[cls_id] : std::to_string(cls_id)) + ": " + score_str;
+                std::string label = (cls_id >= 0 && cls_id < (int)class_names.size() ? class_names[cls_id] : std::to_string(cls_id)) + ": " + score_str;
                 int baseLine;
                 cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
-                cv::rectangle(img, cv::Point(x1, y1 - labelSize.height - 3), cv::Point(x1 + labelSize.width, y1), color, cv::FILLED);
-                cv::putText(img, label, cv::Point(x1, y1 - 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+                // 如果顶部空间不够，就把标签挪到框的内部去画
+                int label_y = (y1 - labelSize.height - 3 < 0) ? y1 + labelSize.height + 3 : y1;
+                cv::rectangle(img, cv::Point(x1, label_y - labelSize.height - 3), cv::Point(x1 + labelSize.width, label_y), color, cv::FILLED);
+                cv::putText(img, label, cv::Point(x1, label_y - 2), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
             }
         }
 
@@ -697,14 +851,7 @@ class YoloTRTRunner {
             cv::Mat blob = preprocess_batch(img_list, scales, dws, dhs);
             auto t_pre_end = std::chrono::high_resolution_clock::now();
 
-            cudaEvent_t event_start, event_h2d, event_comp, event_d2h;
-            if (args.profile){
-                cudaEventCreate(&event_start);
-                cudaEventCreate(&event_h2d);
-                cudaEventCreate(&event_comp);
-                cudaEventCreate(&event_d2h);
-                cudaEventRecord(event_start, stream);
-            }
+            if (args.profile) cudaEventRecord(event_start, stream);
 
             // 2. H2D
             TensorInfo* input_tensor = nullptr;
@@ -712,11 +859,11 @@ class YoloTRTRunner {
                 if (t.is_input){
                     input_tensor = &t;
                     // 设置输入维度
-                    nvinfer1::Dims4 input_dims {real_batch_size, 3, input_height, input_width};
+                    nvinfer1::Dims4 input_dims {real_batch_size, input_channels, input_height, input_width};
                     context->setInputShape(t.name.c_str(), input_dims);
 
                     // 仅拷贝真实的 batch size 数据
-                    size_t input_bytes = real_batch_size * 3 * input_height * input_width * sizeof(float);
+                    size_t input_bytes = real_batch_size * input_channels * input_height * input_width * sizeof(float);
                     cudaMemcpyAsync(t.dev_ptr, blob.ptr<float>(), input_bytes, cudaMemcpyHostToDevice, stream);
                 } else {
                     // 防止INMSlayer的多余框
@@ -769,8 +916,6 @@ class YoloTRTRunner {
                 cudaEventElapsedTime(&prof_times[1], event_start, event_h2d);
                 cudaEventElapsedTime(&prof_times[2], event_h2d, event_comp);
                 cudaEventElapsedTime(&prof_times[3], event_comp, event_d2h);
-                cudaEventDestroy(event_start); cudaEventDestroy(event_h2d);
-                cudaEventDestroy(event_comp);  cudaEventDestroy(event_d2h);
             }
 
             // 5. 后处理
@@ -1009,7 +1154,7 @@ int main(int argc, char** argv){
     }
 
     try {
-        YoloTRTRunner runner(args.engine, args.max_batch_size, args.opt_batch_size, 300, args.conf_thres, args.iou_thres, args.num_classes);
+        YoloTRTRunner runner(args.engine, args.max_batch_size, args.opt_batch_size, 300, args.conf_thres, args.iou_thres, args.profile, args.num_classes);
         runner.run(args);
     } catch (const std::exception& e){
         std::cerr << "致命错误: " << e.what() << std::endl;

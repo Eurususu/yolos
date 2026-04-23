@@ -132,7 +132,7 @@ fp16\
 `cmake .. && make -j8`\
 单帧多帧推理\
 `./build/bin/trt_infer_batch --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
-cuda核函数前处理 单帧多帧推理\
+cuda核函数前后处理 单帧多帧推理\
 `./build/bin/trt_infer_batch_cuda --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
 
 ## run ort val and fps test
