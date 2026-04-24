@@ -14,6 +14,7 @@ def parse_args():
     parser.add_argument("--skip_nodes", type=str, nargs='+', default=[], help="skip quantize op list")
     parser.add_argument("--skip_ops", type=str, nargs='+', default=[], help="skip quantize op type list")
     parser.add_argument("--opset", type=int, default=19, help="19 for fp16 scales support, 21 for int4, 23 for nvfp4")
+    parser.add_argument("--high_precision_dtype", type=str, default="fp16", help="fp16 or fp32")
     args = parser.parse_args()
     return args
 def main(args):
@@ -34,7 +35,7 @@ def main(args):
         calibration_method=args.calib_method,   # max, entropy, awq_clip, rtn_dq etc.
         output_path=args.output_path,
         nodes_to_exclude=args.skip_nodes,
-        high_precision_dtype="fp16",
+        high_precision_dtype=args.high_precision_dtype,
         op_types_to_exclude=args.skip_ops,
         simplify=True,
         dq_only=args.dq_only,

@@ -96,7 +96,7 @@ yolo11n 验证\
 `python utils/prepare_calib.py --image_folder xxx --calibration_size xxx --height xxx --width xxx --output_path xxx`
 ###
 2. int4 int8 fp8量化\
-`python quant/onnx_quantization.py --onnx_path xxx --quantize_mode xxx --calibration_data xxx --calib_method xxx --output_path xxx --dq_only`\
+`python quant/onnx_quantization.py --onnx_path xxx --quantize_mode xxx --calibration_data xxx --calib_method xxx --output_path xxx --dq_only --opset xxx`\
 这里的int4使用awq_clip量化方法，int8 fp8使用 max或者entropy量化方法,这里的输入onnx模型需要simplify的，opset 19。若是想跳过某些layer的的话，可以添加 --skip_nodes\
 `python quant/onnx_quantization.py --onnx_path weights/yolo11s.onnx --quantize_mode int8 --calibration_data /home/jia/project/calib_data.npy --calib_method max --output_path weights/yolo11s_int8.onnx --skip_nodes /model/model.23/dfl/Softmax /model/model.23/dfl/Reshape /model/model.23/dfl/conv/Conv /model/model.23/dfl/Transpose --dq_only`
 
@@ -134,6 +134,8 @@ fp16\
 `./build/bin/trt_infer_batch --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
 cuda核函数前后处理 单帧多帧推理\
 `./build/bin/trt_infer_batch_cuda --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
+多线程推理\
+`./build/bin/trt_infer_cuda_pipeline --engine xxx --source xxx --opt_batch_size xxx --save_dir xxx --save`
 
 ## run ort val and fps test
 1. 端到端模型\

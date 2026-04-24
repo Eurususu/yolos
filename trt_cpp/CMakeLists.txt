@@ -32,7 +32,16 @@ set(SOURCES
     src/trt_infer_batch_cuda.cpp
 )
 
+set(SOURCES_PIPELINE
+    src/efficientNMSInference.cu
+    # src/efficientNMSInference.cuh
+    src/NMSProcessor.cu
+    src/preprocess.cu
+    src/trt_infer_cuda_pipeline.cpp
+)
+
 add_executable(trt_infer_batch_cuda ${SOURCES})
+add_executable(trt_infer_cuda_pipeline ${SOURCES_PIPELINE})
 add_executable(trt_infer_batch src/trt_infer_batch.cpp)
 add_executable(trt_infer_batch_cvnms src/trt_infer_batch_cvnms.cpp)
 
@@ -44,6 +53,15 @@ target_link_libraries(trt_infer_batch_cuda
     nvonnxparser
     nvinfer_plugin
 )
+
+target_link_libraries(trt_infer_cuda_pipeline
+    ${OpenCV_LIBS}
+    ${CUDA_LIBRARIES}
+    nvinfer
+    nvonnxparser
+    nvinfer_plugin
+)
+
 target_link_libraries(trt_infer_batch
     ${OpenCV_LIBS}
     ${CUDA_LIBRARIES}
@@ -61,12 +79,16 @@ target_link_libraries(trt_infer_batch_cvnms
 
 # Compile options
 target_compile_options(trt_infer_batch_cuda PRIVATE -Wall -O3)
+target_compile_options(trt_infer_cuda_pipeline PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch_cvnms PRIVATE -Wall -O3)
 
 
 # Set output directory
 set_target_properties(trt_infer_batch_cuda PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+set_target_properties(trt_infer_cuda_pipeline PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 set_target_properties(trt_infer_batch PROPERTIES

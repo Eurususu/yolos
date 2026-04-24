@@ -14,6 +14,13 @@
 #include "preprocess.h"
 #include "NMSProcessor.h"
 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
+
+
 namespace fs = std::filesystem;
 
 // CUDA 锁页内存分配器
@@ -83,6 +90,53 @@ struct BatchResult {
     std::vector<cv::Vec4f> boxes;
     std::vector<float> scores;
     std::vector<int> classes;
+};
+
+// pipeline data
+struct PipelineData {
+    std::vector<cv::Mat> frames;
+    std::vector<BatchResult> dets;
+    std::vector<float> prof;
+    double batch_time = 0.0;
+    bool is_last = false;
+};
+
+// 线程安全的阻塞队列
+template <typename T>
+class SafeQueue {
+private:
+    std::queue<T> q;
+    std::mutex m;
+    std::condition_variable cv_push, cv_pop;
+    size_t max_size;
+    bool stop_flag = false;
+public:
+    SafeQueue(size_t max_size = 3) : max_size(max_size) {} // 队列长度设为3足以缓冲，太大吃内存
+
+    void push(T val) {
+        std::unique_lock<std::mutex> lock(m);
+        cv_push.wait(lock, [this] { return q.size() < max_size || stop_flag; });
+        if (stop_flag) return;
+        q.push(std::move(val));
+        cv_pop.notify_one();
+    }
+
+    bool pop(T& val) {
+        std::unique_lock<std::mutex> lock(m);
+        cv_pop.wait(lock, [this] { return !q.empty() || stop_flag; });
+        if (stop_flag) return false;
+        val = std::move(q.front());
+        q.pop();
+        cv_push.notify_one();
+        return true;
+    }
+
+    void stop() {
+        std::unique_lock<std::mutex> lock(m);
+        stop_flag = true;
+        cv_push.notify_all();
+        cv_pop.notify_all();
+    }
 };
 
 
@@ -664,6 +718,7 @@ class YoloTRTRunner {
                 }
                 max_src_bytes = max_current_bytes;
             }
+
             // d_img_buffers 存在显存复用， 做到零显存分配
             launch_preprocess_cuda(
                 continuous_imgs,
@@ -748,7 +803,7 @@ class YoloTRTRunner {
             }
 
             if (fs::is_directory(source)){
-                // === 模式 1: 目录图片多批次攒帧推理 ===
+                // === 模式 1: 目录图片多批次攒帧推理 保持串行，补充画框逻辑===
                 std::vector<std::string> img_paths;
                 for (const auto& entry : fs::directory_iterator(source)){
                     std::string ext = entry.path().extension().string();
@@ -788,6 +843,9 @@ class YoloTRTRunner {
                     }
 
 
+                    // if (args.profile){
+                    //     printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
+                    // }
                     if (args.profile){
                         if (noend) {
                             printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | Postprocess(D2H+kernel): %.2fms\n", 
@@ -800,7 +858,6 @@ class YoloTRTRunner {
                     }
                     std::cout << "已处理进度: " << std::min(i + batch_size, img_paths.size()) << "/" << img_paths.size()
                             << " | Batch总耗时: " << std::fixed << std::setprecision(2) << t << "ms\n";
-                 
                 }
                 std::cout << "✅ 目录处理完成。\n";
             }else{
@@ -809,7 +866,7 @@ class YoloTRTRunner {
                 bool is_image = std::find(IMAGE_EXTS.begin(), IMAGE_EXTS.end(), ext) != IMAGE_EXTS.end();
 
                 if (is_image){
-                    // === 模式 2: 单张图片推理 ===
+                    // === 模式 2: 单张图片推理 (保持串行)===
                     cv::Mat img = cv::imread(source);
                     if (img.empty()) return;
 
@@ -854,94 +911,145 @@ class YoloTRTRunner {
                         std::cout << "视频开始处理，按 opt_batch=" << batch_size << " 攒批...\n";
                     }
 
-                    std::vector<cv::Mat> batch_frames;
-                    int frame_count = 0;
-                    bool stop_flag = false;
-                    cv::Mat frame;
+                    std::atomic<bool> pipeline_stop{false};
+                    // 创建两个管道缓冲队列 容量为3
+                    SafeQueue<PipelineData> in_queue(3);
+                    SafeQueue<PipelineData> out_queue(3);
 
-                    auto last_batch_time = std::chrono::high_resolution_clock::now();
-                    auto global_start_time = last_batch_time;
+                    // ----------------------------------------------------
+                    // 🧵 线程 1: Reader (专职读图，IO 密集型)
+                    // ----------------------------------------------------
+                    std::thread reader_thread([&](){
+                        std::vector<cv::Mat> batch_frames;
+                        cv::Mat frame;
+                        while (!pipeline_stop && cap.read(frame)){
+                            batch_frames.push_back(frame.clone());
+                            if (batch_frames.size() == static_cast<size_t>(batch_size)){
+                                PipelineData data;
+                                data.frames = batch_frames;
+                                in_queue.push(data);
+                                batch_frames.clear();
+                            }
+                        }
+                        if (!batch_frames.empty() && !pipeline_stop){
+                            PipelineData data;
+                            data.frames = batch_frames;
+                            in_queue.push(data);
+                        }
+
+                        // 读完了，发个空包当结束信号
+
+                        if (!pipeline_stop){
+                            PipelineData end_data;
+                            end_data.is_last = true;
+                            in_queue.push(end_data);
+                        }
+                    });
 
 
-                    while (cap.read(frame)){
-                        if (frame.empty()) break;
-
-                        batch_frames.push_back(frame.clone());
-                        
-                        if (batch_frames.size() == static_cast<int>(batch_size)){
-
-                            // ======== 记录整个 Batch 的真实耗时 ========
-                            auto current_batch_time = std::chrono::high_resolution_clock::now();
-                            double batch_total_time = std::chrono::duration<double, std::milli>(current_batch_time - last_batch_time).count();
-                            last_batch_time = current_batch_time; 
-
-                            double true_fps = 1000.0 / (batch_total_time / batch_size);
-
+                    // ----------------------------------------------------
+                    // 🧵 线程 2: Worker (专职调用 TRT，GPU 计算密集型)
+                    // ----------------------------------------------------
+                    std::thread worker_thread([&](){
+                        PipelineData data;
+                        while (in_queue.pop(data)){
+                            if (pipeline_stop) break;
+                            if (data.is_last){
+                                out_queue.push(data); // 击鼓传花，把结束信号传给主线程
+                                break;
+                            }
                             auto t1 = std::chrono::high_resolution_clock::now();
-                            auto [batch_dets, prof] = infer_batch(batch_frames, args);
+                            auto [dets, prof] = infer_batch(data.frames, args);
                             auto t2 = std::chrono::high_resolution_clock::now();
-                            double batch_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
-                            double gpu_fps = 1000.0 / (batch_time / batch_size);
 
-                            // if (args.profile) {
-                            //     printf("[Profile] H2D: %.2fms | Comp: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
-                            // }
-                            if (args.profile){
-                                if (noend) {
-                                    printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | Postprocess(D2H+kernel): %.2fms\n", 
-                                    prof[0], prof[1], prof[3]);
-                                }
-                                else {
-                                    printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms\n", 
-                                    prof[0], prof[1], prof[2], prof[3]);
+                            data.dets = dets;
+                            data.prof = prof;
+                            data.batch_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
+                            out_queue.push(data);
+                        }
+                    });
+
+                    // ----------------------------------------------------
+                    // 🧵 主线程: Writer (专职画框、显示、写硬盘)
+                    // ----------------------------------------------------
+
+
+                    int frame_count = 0;
+                    PipelineData out_data;
+                    
+                    auto last_pop_time = std::chrono::high_resolution_clock::now();
+                    auto global_start_time = last_pop_time;
+
+                    while (out_queue.pop(out_data)){
+                        if (out_data.is_last) break;
+
+                        auto current_pop_time = std::chrono::high_resolution_clock::now();
+                        double pipeline_batch_time = std::chrono::duration<double, std::milli>(current_pop_time - last_pop_time).count();
+                        last_pop_time = current_pop_time; // 更新打点
+
+                        // 1. 真实的端到端流水线 FPS
+                        double true_fps = 1000.0 / (pipeline_batch_time / out_data.frames.size());
+                        // 2. GPU 纯算力 FPS
+                        double gpu_fps = 1000.0 / (out_data.batch_time / out_data.frames.size());
+
+
+                        if (args.profile){
+                            auto prof = out_data.prof;
+                            if (noend) {
+                                printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | Postprocess(D2H+kernel): %.2fms\n", 
+                                prof[0], prof[1], prof[3]);
+                            }
+                            else {
+                                printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | D2H: %.2fms | Postprocess: %.2fms\n", 
+                                prof[0], prof[1], prof[2], prof[3]);
+                            }
+                        }
+
+                        for (size_t i = 0; i < out_data.frames.size(); i++){
+                            // 1. 画框
+                            draw_results(out_data.frames[i], out_data.dets[i]);
+
+                            // 2. 显示FPS
+                            char fps_text[128];
+                            snprintf(fps_text, sizeof(fps_text), "SYS FPS: %.1f | GPU FPS: %.1f", true_fps, gpu_fps);
+                            cv::putText(out_data.frames[i], fps_text, cv::Point(20, 40),
+                                        cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                            
+                            // 3. 写入视频与显示
+                            if (out_writer.isOpened()) out_writer.write(out_data.frames[i]);
+                            if (!args.no_show){
+                                cv::imshow("TRT C++ Pipeline", out_data.frames[i]);
+                                if (cv::waitKey(1) == 'q') {
+                                    pipeline_stop = true;
+                                    in_queue.stop(); out_queue.stop(); // 优雅关闭线程
+                                    break;
                                 }
                             }
+                        }
 
-                            for (size_t i = 0; i < batch_frames.size(); i++){
-                                draw_results(batch_frames[i], batch_dets[i]);
-                                char fps_text[128];
-                                snprintf(fps_text, sizeof(fps_text), "SYS FPS: %.1f | GPU FPS: %.1f", true_fps, gpu_fps);
-                                cv::putText(batch_frames[i], fps_text, cv::Point(20, 40),
-                                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                        if (pipeline_stop) break;
 
-                                if (out_writer.isOpened()) out_writer.write(batch_frames[i]);
-
-                                if (!args.no_show){
-                                    cv::imshow("TRT C++ Inference", batch_frames[i]);
-                                    if (cv::waitKey(1) == 'q') {stop_flag = true; break;}
-                                }
-                            }
-                            if (stop_flag) break;
-
-                            frame_count += batch_size;
-                            if (frame_count % (batch_size * 5) == 0) {
-                                std::cout << "已处理 " << frame_count << " 帧 | "
-                                      << "GPU 耗时: " << std::fixed << std::setprecision(1) << batch_time << "ms | "
-                                      << "流水线节拍耗时: " << batch_total_time << "ms\n";
-                            }
-
-                            batch_frames.clear();
+                        frame_count += out_data.frames.size();
+                        if (frame_count % (batch_size * 5) == 0) {
+                            std::cout << "已处理 " << frame_count << " 帧 | "
+                                      << "GPU 耗时: " << std::fixed << std::setprecision(1) << out_data.batch_time << "ms | "
+                                      << "流水线节拍耗时: " << pipeline_batch_time << "ms\n";
                         }
                     }
 
-                    // 处理尾部帧
-                    if (!batch_frames.empty() && !stop_flag){
-                        auto [batch_dets, prof] = infer_batch(batch_frames, args);
-                        for (size_t i = 0; i < batch_frames.size(); i++) {
-                            draw_results(batch_frames[i], batch_dets[i]);
-                            if (out_writer.isOpened()) out_writer.write(batch_frames[i]);
-                            if (!args.no_show) { cv::imshow("TRT C++ Inference", batch_frames[i]); cv::waitKey(1); }
-                        }
-                    }
-
+                    // ----------------------------------------------------
+                    // 🪦 打扫战场
+                    // ----------------------------------------------------
                     auto global_end_time = std::chrono::high_resolution_clock::now();
                     double total_seconds = std::chrono::duration<double>(global_end_time - global_start_time).count();
 
+                    reader_thread.join();
+                    worker_thread.join();
                     cap.release();
                     if (out_writer.isOpened()) out_writer.release();
                     cv::destroyAllWindows();
                     std::cout << "\n=========================================\n";
-                    std::cout << "✅ 视频检测完毕。\n";
+                    std::cout << "✅ 视频多线程检测完毕。\n";
                     std::cout << "处理总帧数: " << frame_count << " 帧\n";
                     std::cout << "系统平均总吞吐量: " << frame_count / total_seconds << " FPS\n";
                     std::cout << "=========================================\n";
