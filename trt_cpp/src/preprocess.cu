@@ -25,7 +25,7 @@ __global__ void preprocess_kernel(
     float scale = fminf((float)dst_w / src_w, (float)dst_h / src_h);
     int new_w = roundf(src_w * scale);
     int new_h = roundf(src_h * scale);
-    int dw = (dst_w - new_w) / 2;
+    int dw = (dst_w - new_w) / 2; //偏移量 也就是padding
     int dh = (dst_h - new_h) / 2;
 
     // 默认背景色归一化值 (114 / 255.0)

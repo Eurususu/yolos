@@ -1034,8 +1034,14 @@ class YoloTRTRunner {
 
                     int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
                     int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+                    // double fps = cap.get(cv::CAP_PROP_FPS);
+                    // if (fps == 0.0) fps = 25.0;
+
                     double fps = cap.get(cv::CAP_PROP_FPS);
-                    if (fps == 0.0) fps = 25.0;
+                    if (fps <= 0.0 || std::isnan(fps) || std::isinf(fps)){
+                        std::cout << "[警告] 无法获取真实 FPS，强制使用默认值 25.0\n";
+                        fps = 25.0;
+                    }
 
                     cv::VideoWriter out_writer;
                     bool is_file = fs::exists(source);

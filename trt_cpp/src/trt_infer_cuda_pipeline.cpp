@@ -68,6 +68,7 @@ struct Args {
     bool end2end_model = false;
     bool ultralytics = false;
     bool no_show = false;
+    bool no_draw = false;
     bool profile = false;
 };
 
@@ -113,29 +114,71 @@ private:
 public:
     SafeQueue(size_t max_size = 3) : max_size(max_size) {} // 队列长度设为3足以缓冲，太大吃内存
 
-    void push(T val) {
+    // void push(T val) {
+    //     std::unique_lock<std::mutex> lock(m);
+    //     cv_push.wait(lock, [this] { return q.size() < max_size || stop_flag; }); // 等待队列有空间或者收到停止信号
+    //     if (stop_flag) return;
+    //     q.push(std::move(val)); // 等待成功则进行push
+    //     cv_pop.notify_one(); // 通知在等待消费的线程
+    // }
+
+
+    // 支持右值，避免不必要的拷贝
+    bool push (T&& val){
+        /*
+        尝试获得互斥锁，如果没有其他线程持有锁，则成功获得锁，并继续执行后续代码；
+        如果其他线程已经持有锁，那么当前线程就会阻塞，什么都做不了，这个线程处于等待锁的状态，知道它获得锁。
+        */
         std::unique_lock<std::mutex> lock(m);
-        cv_push.wait(lock, [this] { return q.size() < max_size || stop_flag; });
-        if (stop_flag) return;
+        /*
+        只有成功获得锁之后，才会去检查lambda函数，如果条件不满足，线程就会释放锁，进入沉睡，如果条件满足就继续执行后续代码。
+        
+        处于睡眠状态（Sleep）的线程，是不消耗 CPU 资源的，它也完全失去了执行代码的能力。 
+        它根本无法去检查那个 lambda 表达式（q.size() < max_size）是否已经变成了 true。
+        它就像一个深度昏迷的人。如果没人唤醒就一直睡下去，即使条件已经满足了也不会自己醒来。
+        这个时候需要通过cv_push.notify_one()来唤醒它，否则他就一直睡下去，这就是死锁。
+        */
+        cv_push.wait(lock, [this] {return q.size() < max_size || stop_flag;});
+
+        if (stop_flag) return false;
+
         q.push(std::move(val));
+        lock.unlock();
         cv_pop.notify_one();
+        return true;
+    }
+
+
+    // 支持左值
+    bool push(const T& val){
+        std::unique_lock<std::mutex> lock(m);
+        cv_push.wait(lock, [this] {return q.size() < max_size || stop_flag;});
+
+        if (stop_flag) return false;
+
+        q.push(val);
+        lock.unlock();
+        cv_pop.notify_one();
+        return true;
     }
 
     bool pop(T& val) {
         std::unique_lock<std::mutex> lock(m);
-        cv_pop.wait(lock, [this] { return !q.empty() || stop_flag; });
-        if (stop_flag) return false;
-        val = std::move(q.front());
-        q.pop();
-        cv_push.notify_one();
+        cv_pop.wait(lock, [this] { return !q.empty() || stop_flag; }); // 等待队列非空或者收到停止信号
+        if (stop_flag && q.empty()) return false;
+        val = std::move(q.front()); // 取出队列头元素
+        q.pop(); // pop 后才释放锁，确保生产者在 push 后能第一时间看到队列状态的改变
+        lock.unlock();
+        cv_push.notify_one(); // 条件变量中的 lambda 表达式，并不是在后台时刻不停地被监控着 所以需要pop之后手动通知生产者线程，唤醒他们继续生产
         return true;
     }
 
     void stop() {
         std::unique_lock<std::mutex> lock(m);
-        stop_flag = true;
-        cv_push.notify_all();
-        cv_pop.notify_all();
+        stop_flag = true; // 设置停止标志，通知所有等待线程
+        lock.unlock();
+        cv_push.notify_all(); // 唤醒所有等待生产的线程
+        cv_pop.notify_all(); // 唤醒所有等待消费的线程
     }
 };
 
@@ -361,8 +404,15 @@ class YoloTRTRunner {
                     io_tensors.push_back(info);
 
                 }
-                cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*));
+                // cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*));
+                // d_img_buffers.resize(max_batch_size, nullptr);
+
+                max_src_bytes = 1920 * 1080 * 3;
+                if (cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*)) != cudaSuccess) throw std::runtime_error("d_img_ptrs 失败");
                 d_img_buffers.resize(max_batch_size, nullptr);
+                for (int i = 0; i < max_batch_size; i++) {
+                    if (cudaMalloc((void**)&d_img_buffers[i], max_src_bytes) != cudaSuccess) throw std::runtime_error("d_img_buffers 失败");
+                }
 
                 TensorInfo* out_info = nullptr;
                 for (auto& t : io_tensors) {
@@ -437,7 +487,9 @@ class YoloTRTRunner {
         std::vector<BatchResult> process_output(const Args& args, int real_batch_size, const std::vector<float>& scales, 
             const std::vector<int>& dws, const std::vector<int>& dhs){
             std::vector<BatchResult> batch_dets(real_batch_size);
-
+            /*
+            给所有的 batch 预留一个“经验值”空间（比如 100），避免在后续的 push_back 时频繁触发 vector 的扩容机制（重新分配内存并复制数据），从而提升性能。1
+            */
             for (int b = 0; b < real_batch_size; b++) {
                 batch_dets[b].boxes.reserve(100);
                 batch_dets[b].scores.reserve(100);
@@ -480,7 +532,6 @@ class YoloTRTRunner {
                 for (int b = 0; b < real_batch_size; b++){
                     // 读取当前帧有效框的数量
                     int valid_count = get_int_val(t_num, b);
-
                     batch_dets[b].boxes.reserve(valid_count);
                     batch_dets[b].scores.reserve(valid_count);
                     batch_dets[b].classes.reserve(valid_count);
@@ -702,7 +753,7 @@ class YoloTRTRunner {
                 }
                 continuous_imgs.push_back(img);
                 
-                int bytes = img.cols * img.rows * 3;
+                int bytes = img.cols * img.rows * input_channels;
                 if (bytes > max_current_bytes) {
                     max_current_bytes = bytes;
                 }
@@ -741,7 +792,7 @@ class YoloTRTRunner {
 
             // 4. D2H & 获取真实维度 (零拷贝视图的等效实现)
             bool need_full_d2h = true; // 默认需要拷回全量数据
-            if (noend){need_full_d2h = false;} // 触发极致零拷贝模式！
+            if (noend){need_full_d2h = false;} // 触发极致零拷贝模式！只有端到端模型需要全量数据，其他情况都不需要，直接在 GPU 上处理完后只拷回有效结果即可
             for (auto& t : io_tensors){
                 if (!t.is_input){
                     nvinfer1::Dims actual_dims = context->getTensorShape(t.name.c_str());
@@ -838,7 +889,7 @@ class YoloTRTRunner {
 
                     // 手动画框并保存
                     for (size_t k = 0; k < valid_imgs.size(); ++k){
-                        draw_results(valid_imgs[k], batch_dets[k]);
+                        if (!args.no_draw) draw_results(valid_imgs[k], batch_dets[k]);
                         if (args.save) cv::imwrite((fs::path(save_dir)/valid_names[k]).string(), valid_imgs[k]);
                     }
 
@@ -874,7 +925,7 @@ class YoloTRTRunner {
                     auto [batch_dets, prof] = infer_batch({img}, args);
                     auto t2 = std::chrono::high_resolution_clock::now();
                     double t = std::chrono::duration<double, std::milli>(t2 - t1).count();
-                    draw_results(img, batch_dets[0]);
+                    if (!args.no_draw) draw_results(img, batch_dets[0]);
                     if (args.save) cv::imwrite((fs::path(save_dir)/fs::path(source).filename()).string(), img);
 
                     // if (args.profile) printf("[Profile] H2D: %.2fms | Compute: %.2fms | D2H: %.2fms\n", prof[0], prof[1], prof[2]);
@@ -900,8 +951,14 @@ class YoloTRTRunner {
 
                     int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
                     int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+                    // double fps = cap.get(cv::CAP_PROP_FPS);
+                    // if (fps == 0.0) fps = 25.0;
+
                     double fps = cap.get(cv::CAP_PROP_FPS);
-                    if (fps == 0.0) fps = 25.0;
+                    if (fps <= 0.0 || std::isnan(fps) || std::isinf(fps)){
+                        std::cout << "[警告] 无法获取真实 FPS，强制使用默认值 25.0\n";
+                        fps = 25.0;
+                    }
 
                     cv::VideoWriter out_writer;
                     bool is_file = fs::exists(source);
@@ -911,7 +968,14 @@ class YoloTRTRunner {
                         std::cout << "视频开始处理，按 opt_batch=" << batch_size << " 攒批...\n";
                     }
 
-                    std::atomic<bool> pipeline_stop{false};
+
+                    /*
+                    为什么使用 std::atomic<bool>？
+                    在多线程环境中，多个线程可能会同时访问和修改同一个变量。如果这个变量是一个普通的 bool 类型，那么在没有适当的同步机制（如互斥锁）的情况下，可能会导致数据竞争
+                    另外编译阶段使用了-O3优化选项，编译器可能会对普通的 bool 变量进行寄存器优化，每次循环只检查寄存器里的值。导致一个线程修改了这个变量的值，但其他线程可能无法及时看到这个更新，从而无法正确响应停止信号。
+                    atomic 告诉编译器：“这个变量随时可能被别的线程暗改！你绝对不许把它优化到寄存器里。每次读它，都必须老老实实去主内存（或多核共享缓存）里拿最新的一手数据！
+                    */
+                    std::atomic<bool> pipeline_stop{false}; // 线程安全的停止信号
                     // 创建两个管道缓冲队列 容量为3
                     SafeQueue<PipelineData> in_queue(3);
                     SafeQueue<PipelineData> out_queue(3);
@@ -922,16 +986,16 @@ class YoloTRTRunner {
                     std::thread reader_thread([&](){
                         std::vector<cv::Mat> batch_frames;
                         cv::Mat frame;
-                        while (!pipeline_stop && cap.read(frame)){
+                        while (!pipeline_stop && cap.read(frame)){ // 只要读到帧且没有停止信号，就不断的往队列里面放数据
                             batch_frames.push_back(frame.clone());
-                            if (batch_frames.size() == static_cast<size_t>(batch_size)){
+                            if (batch_frames.size() == static_cast<size_t>(batch_size)){ // 凑够一个批次的图片就推送入队列
                                 PipelineData data;
                                 data.frames = batch_frames;
                                 in_queue.push(data);
                                 batch_frames.clear();
                             }
                         }
-                        if (!batch_frames.empty() && !pipeline_stop){
+                        if (!batch_frames.empty() && !pipeline_stop){ // 尾部不足一个批次的残余帧也送入队列
                             PipelineData data;
                             data.frames = batch_frames;
                             in_queue.push(data);
@@ -1006,14 +1070,16 @@ class YoloTRTRunner {
                         }
 
                         for (size_t i = 0; i < out_data.frames.size(); i++){
-                            // 1. 画框
-                            draw_results(out_data.frames[i], out_data.dets[i]);
+                            if (!args.no_draw){
+                                // 1. 画框
+                                draw_results(out_data.frames[i], out_data.dets[i]);
 
-                            // 2. 显示FPS
-                            char fps_text[128];
-                            snprintf(fps_text, sizeof(fps_text), "SYS FPS: %.1f | GPU FPS: %.1f", true_fps, gpu_fps);
-                            cv::putText(out_data.frames[i], fps_text, cv::Point(20, 40),
-                                        cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                                // 2. 显示FPS
+                                char fps_text[128];
+                                snprintf(fps_text, sizeof(fps_text), "SYS FPS: %.1f | GPU FPS: %.1f", true_fps, gpu_fps);
+                                cv::putText(out_data.frames[i], fps_text, cv::Point(20, 40),
+                                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                            }
                             
                             // 3. 写入视频与显示
                             if (out_writer.isOpened()) out_writer.write(out_data.frames[i]);
@@ -1080,6 +1146,7 @@ int main(int argc, char** argv){
         else if (arg == "--end2end_model") args.end2end_model = true;
         else if (arg == "--ultralytics") args.ultralytics = true;
         else if (arg == "--no_show") args.no_show = true;
+        else if (arg == "--no_draw") args.no_draw = true;
         else if (arg == "--profile") args.profile = true;
         else if (arg == "-h" || arg == "--help") {
             std::cout << "用法: " << argv[0] << " [选项]\n"

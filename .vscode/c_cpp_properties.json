@@ -4,9 +4,9 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/usr/local/include/opencv4/**",
-                "/usr/local/cuda/include/**",
-                "/opt/TensorRT/include/**",
+                "/usr/local/include/opencv4",
+                "/usr/local/cuda/include",
+                "/opt/TensorRT/include",
                 "/home/jia/project/yolos/onnxruntime-linux-x64-gpu-1.24.4/include"
             ],
             "defines": [],

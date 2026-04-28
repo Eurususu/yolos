@@ -79,7 +79,7 @@ target_link_libraries(trt_infer_batch_cvnms
 
 # Compile options
 target_compile_options(trt_infer_batch_cuda PRIVATE -Wall -O3)
-target_compile_options(trt_infer_cuda_pipeline PRIVATE -Wall -O3)
+target_compile_options(trt_infer_cuda_pipeline PRIVATE -Wall -O3 -pthread)
 target_compile_options(trt_infer_batch PRIVATE -Wall -O3)
 target_compile_options(trt_infer_batch_cvnms PRIVATE -Wall -O3)
 
