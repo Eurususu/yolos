@@ -132,7 +132,7 @@ public:
         std::unique_lock<std::mutex> lock(m);
         /*
         只有成功获得锁之后，才会去检查lambda函数，如果条件不满足，线程就会释放锁，进入沉睡，如果条件满足就继续执行后续代码。
-        
+
         处于睡眠状态（Sleep）的线程，是不消耗 CPU 资源的，它也完全失去了执行代码的能力。 
         它根本无法去检查那个 lambda 表达式（q.size() < max_size）是否已经变成了 true。
         它就像一个深度昏迷的人。如果没人唤醒就一直睡下去，即使条件已经满足了也不会自己醒来。
@@ -236,6 +236,8 @@ class YoloTRTRunner {
         std::vector<TensorInfo> io_tensors;
         std::vector<uint8_t*> d_img_buffers;  // 指向每张图原数据显存的指针列表
         uint8_t** d_img_ptrs = nullptr;  // GPU 端的指针目录
+        int* d_img_widths = nullptr; // GPU端预处理核函数需要的输入图像宽度列表
+        int* d_img_heights = nullptr; // GPU端预处理核函数需要的输入图像高度列表
         int max_src_bytes = 0; 
         int input_width;
         int input_height;
@@ -272,6 +274,8 @@ class YoloTRTRunner {
                 if (ptr) { cudaFree(ptr); ptr = nullptr; }
             }
             if (d_img_ptrs) { cudaFree(d_img_ptrs); d_img_ptrs = nullptr; }
+            if (d_img_widths) { cudaFree(d_img_widths); d_img_widths = nullptr; }
+            if (d_img_heights) { cudaFree(d_img_heights); d_img_heights = nullptr; }
 
             if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
 
@@ -409,6 +413,8 @@ class YoloTRTRunner {
 
                 max_src_bytes = 1920 * 1080 * 3;
                 if (cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*)) != cudaSuccess) throw std::runtime_error("d_img_ptrs 失败");
+                if (cudaMalloc((void **)&d_img_widths, max_batch_size * sizeof(int)) != cudaSuccess) throw std::runtime_error("d_img_widths 失败");
+                if (cudaMalloc((void **)&d_img_heights, max_batch_size * sizeof(int)) != cudaSuccess) throw std::runtime_error("d_img_heights 失败");
                 d_img_buffers.resize(max_batch_size, nullptr);
                 for (int i = 0; i < max_batch_size; i++) {
                     if (cudaMalloc((void**)&d_img_buffers[i], max_src_bytes) != cudaSuccess) throw std::runtime_error("d_img_buffers 失败");
@@ -777,6 +783,7 @@ class YoloTRTRunner {
                 input_width, input_height,
                 d_img_buffers,
                 d_img_ptrs,
+                d_img_widths, d_img_heights,
                 scales, dws, dhs,   // <--- 这里接收返回值
                 stream
             );
@@ -990,15 +997,23 @@ class YoloTRTRunner {
                             batch_frames.push_back(frame.clone());
                             if (batch_frames.size() == static_cast<size_t>(batch_size)){ // 凑够一个批次的图片就推送入队列
                                 PipelineData data;
-                                data.frames = batch_frames;
-                                in_queue.push(data);
-                                batch_frames.clear();
+                                // 使用swap而不是直接赋值
+                                // data.frames = batch_frames;
+                                std::swap(data.frames, batch_frames);
+                                // 使用右值传入，触发移动语义，避免不必要的复制
+                                // in_queue.push(data);
+                                in_queue.push(std::move(data));
+                                // batch_frames.clear();
+                                // swap之后batch_frames是空的，直接reserve就行了
+                                batch_frames.reserve(batch_size);
                             }
                         }
                         if (!batch_frames.empty() && !pipeline_stop){ // 尾部不足一个批次的残余帧也送入队列
                             PipelineData data;
-                            data.frames = batch_frames;
-                            in_queue.push(data);
+                            // data.frames = batch_frames;
+                            std::swap(data.frames, batch_frames);
+                            // 右值传人，同理
+                            in_queue.push(std::move(data));
                         }
 
                         // 读完了，发个空包当结束信号
@@ -1006,7 +1021,7 @@ class YoloTRTRunner {
                         if (!pipeline_stop){
                             PipelineData end_data;
                             end_data.is_last = true;
-                            in_queue.push(end_data);
+                            in_queue.push(std::move(end_data));
                         }
                     });
 
@@ -1019,17 +1034,17 @@ class YoloTRTRunner {
                         while (in_queue.pop(data)){
                             if (pipeline_stop) break;
                             if (data.is_last){
-                                out_queue.push(data); // 击鼓传花，把结束信号传给主线程
+                                out_queue.push(std::move(data)); // 击鼓传花，把结束信号传给主线程
                                 break;
                             }
                             auto t1 = std::chrono::high_resolution_clock::now();
                             auto [dets, prof] = infer_batch(data.frames, args);
                             auto t2 = std::chrono::high_resolution_clock::now();
 
-                            data.dets = dets;
-                            data.prof = prof;
+                            data.dets = std::move(dets);
+                            data.prof = std::move(prof);
                             data.batch_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
-                            out_queue.push(data);
+                            out_queue.push(std::move(data));
                         }
                     });
 
@@ -1058,7 +1073,7 @@ class YoloTRTRunner {
 
 
                         if (args.profile){
-                            auto prof = out_data.prof;
+                            const auto& prof = out_data.prof;
                             if (noend) {
                                 printf("[Profile] Preprocess(H2D+Kernel): %.2fms | Compute: %.2fms | Postprocess(D2H+kernel): %.2fms\n", 
                                 prof[0], prof[1], prof[3]);

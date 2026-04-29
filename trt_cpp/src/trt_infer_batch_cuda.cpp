@@ -139,6 +139,8 @@ class YoloTRTRunner {
         std::vector<TensorInfo> io_tensors;
         std::vector<uint8_t*> d_img_buffers;  // 指向每张图原数据显存的指针列表
         uint8_t** d_img_ptrs = nullptr;  // GPU 端的指针目录
+        int* d_img_widths = nullptr; // GPU端预处理核函数需要的输入图像宽度列表
+        int* d_img_heights = nullptr; // GPU端预处理核函数需要的输入图像高度列表
         int max_src_bytes = 0; 
         int input_width;
         int input_height;
@@ -175,6 +177,8 @@ class YoloTRTRunner {
                 if (ptr) { cudaFree(ptr); ptr = nullptr; }
             }
             if (d_img_ptrs) { cudaFree(d_img_ptrs); d_img_ptrs = nullptr; }
+            if (d_img_widths) { cudaFree(d_img_widths); d_img_widths = nullptr; }
+            if (d_img_heights) { cudaFree(d_img_heights); d_img_heights = nullptr; }
 
             if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
 
@@ -307,8 +311,14 @@ class YoloTRTRunner {
                     io_tensors.push_back(info);
 
                 }
-                cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*));
+                max_src_bytes = 1920 * 1080 * 3;
+                if (cudaMalloc((void **)&d_img_ptrs, max_batch_size * sizeof(uint8_t*)) != cudaSuccess) throw std::runtime_error("d_img_ptrs 失败");
+                if (cudaMalloc((void **)&d_img_widths, max_batch_size * sizeof(int)) != cudaSuccess) throw std::runtime_error("d_img_widths 失败");
+                if (cudaMalloc((void **)&d_img_heights, max_batch_size * sizeof(int)) != cudaSuccess) throw std::runtime_error("d_img_heights 失败");
                 d_img_buffers.resize(max_batch_size, nullptr);
+                for (int i = 0; i < max_batch_size; i++) {
+                    if (cudaMalloc((void**)&d_img_buffers[i], max_src_bytes) != cudaSuccess) throw std::runtime_error("d_img_buffers 失败");
+                }
 
                 TensorInfo* out_info = nullptr;
                 for (auto& t : io_tensors) {
@@ -671,6 +681,7 @@ class YoloTRTRunner {
                 input_width, input_height,
                 d_img_buffers,
                 d_img_ptrs,
+                d_img_widths, d_img_heights,
                 scales, dws, dhs,   // <--- 这里接收返回值
                 stream
             );

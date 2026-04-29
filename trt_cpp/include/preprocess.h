@@ -11,6 +11,7 @@ void launch_preprocess_cuda(
     int dst_w, int dst_h,
     const std::vector<uint8_t*>& d_img_buffers, 
     uint8_t** d_img_ptrs,
+    int* d_image_widths, int* d_image_heights, // 新增：由外部传入预分配好的显存！
     std::vector<float>& out_scales,
     std::vector<int>& out_dws,
     std::vector<int>& out_dhs,
