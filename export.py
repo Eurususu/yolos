@@ -10,6 +10,47 @@ import argparse
 from ultralytics import YOLO
 from ultralytics.nn.modules.head import Detect
 
+import subprocess
+import os
+
+def convert_onnx_to_fp16_via_cli(input_path, output_path):
+    """
+    使用 Polygraphy 命令行将 FP32 ONNX 转换为 FP16
+    """
+    if not os.path.exists(input_path):
+        print(f"❌ 错误：找不到输入模型 {input_path}")
+        return False
+
+    # 1. 以列表形式构建命令行（推荐格式，防错率高）
+    command = [
+        "polygraphy", "convert", input_path,
+        "--output", output_path,
+        "--fp16"
+    ]
+    
+    print(f"🚀 正在执行命令: {' '.join(command)}")
+    
+    try:
+        # 2. 执行命令
+        # check=True: 如果命令执行失败（返回码非0），会自动抛出异常
+        # text=True, capture_output=True: 以文本形式捕获终端的打印日志
+        result = subprocess.run(command, check=True, text=True, capture_output=True)
+        
+        print(f"✅ 转换成功！FP16 模型已保存至: {output_path}")
+        
+        # 如果你想看 Polygraphy 内部打印的具体日志，可以取消下面这行的注释
+        # print(result.stdout) 
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print("❌ 转换失败！")
+        print("💡 错误原因 (stderr):")
+        print(e.stderr)  # 打印具体的报错信息
+        return False
+    except FileNotFoundError:
+        print("❌ 错误：找不到 polygraphy 命令，请确认是否已安装并在环境变量中。")
+        return False
+
 def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='', help='weights path')
@@ -25,6 +66,7 @@ def parse_opt():
     parser.add_argument('--opset', type=int, default=19, help='ONNX opset version')
     parser.add_argument('--simplify', action='store_true', help='whether to simplify onnx model using onnxsim')
     parser.add_argument('--seg', action='store_true', help='whether to export segmentation model')
+    parser.add_argument("--fp16", action='store_true', help="whether to convert the model to FP16 after export")
     opt = parser.parse_args()
     return opt
 
@@ -110,9 +152,19 @@ def run_export(opt):
                 LOGGER.warning(f"Shape inference failed, saving without updated shapes: {e}")
                 final_model = gs.export_onnx(graph)
             
-            
+
             onnx.save(final_model, export_file)
-            LOGGER.info(f'ONNX export success: {export_file}')
+            LOGGER.info(f'FP32 ONNX export success: {export_file}')
+
+            if opt.fp16:
+                LOGGER.info("Converting ONNX model to FP16 using Polygraphy CLI...")
+                fp16_export_file = export_file.replace('.onnx', '_fp16.onnx')
+                success = convert_onnx_to_fp16_via_cli(export_file, fp16_export_file)
+                if success:
+                    export_file = fp16_export_file  # 更新为 FP16 模型路径
+                    LOGGER.info(f"FP16 ONNX export success: {export_file}")
+                else:
+                    LOGGER.warning("FP16 conversion failed, keeping original FP32 model.")
     except Exception as e:
         LOGGER.info(f'ONNX export failure: {e}')
         raise e
