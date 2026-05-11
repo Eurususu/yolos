@@ -54,6 +54,7 @@ def convert_onnx_to_fp16_via_cli(input_path, output_path):
 def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='', help='weights path')
+    parser.add_argument("--qat_model", type=str, default='', help='qat weights path' )
     parser.add_argument('--end2end_model', action='store_true', help='whether the model is end2end')
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--topk_all', type=int, default=100, help='max number of detections per image')
@@ -76,7 +77,22 @@ def run_export(opt):
     # model = load_checkpoint(opt.weights,ultralytics=opt.ultralytics, map_location=device)
     if opt.end2end and opt.end2end_model:
         raise NotImplementedError("End2End export for end2end model is not supported.")
-    model = YOLO(opt.model).model
+    # model = YOLO(opt.model).model
+    if opt.qat_model:
+        LOGGER.info(f"🧱 1. Loading base architecture from: {opt.model}")
+        # 先加载原版模型把骨架撑起来
+        model = YOLO(opt.model).model
+        model = model.fuse()
+        
+        LOGGER.info(f"👻 2. Restoring QAT weights and QDQ nodes from: {opt.qat_model}")
+        # 导入 ModelOpt 恢复量化权重
+        import modelopt.torch.opt as mto
+        mto.restore(model, opt.qat_model)
+    else:
+        # 如果没有传 base_model，说明是导出普通的 YOLO 模型
+        LOGGER.info(f"📦 Loading standard YOLO model from: {opt.model}")
+        model = YOLO(opt.model).model
+
     for m in model.modules():
         if isinstance(m, Detect):
             m.export = True 
