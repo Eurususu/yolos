@@ -57,7 +57,7 @@ def parse_opt():
     parser.add_argument("--qat_model", type=str, default='', help='qat weights path' )
     parser.add_argument('--end2end_model', action='store_true', help='whether the model is end2end')
     parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--topk_all', type=int, default=100, help='max number of detections per image')
+    parser.add_argument('--topk_all', type=int, default=300, help='max number of detections per image')
     parser.add_argument('--iou_thres', type=float, default=0.7, help='iou threshold for NMS')
     parser.add_argument('--conf_thres', type=float, default=0.25, help='confidence threshold for NMS')
     parser.add_argument('--dynamic_batch', action='store_true', help='whether to export dynamic batch size')

@@ -75,11 +75,12 @@ yolov10s.engine 端到端模型推理\
 `python train.py --data data/coco128.yaml --model weights/yolo11n.pt --epochs 300 --batch 64 --device 0 --name "yolo11n_coco128" --plots`
 
 多卡yolo11n 训练\
+`python train.py --data data/coco128.yaml --model "weights/yolo11n.pt" --epochs 300 --batch 128 --device 0,1 --name yolo11n_coco128 --plots`
 `torchrun --nproc_per_node 2 --master_port 10001 train.py --data data/coco128.yaml --model "weights/yolo11n.pt" --epochs 300 --batch 128 --device 0,1 --name yolo11n_coco128 --plots`
 
 ### val
 yolo11n 验证\
-`python val.py --model weights/yolo11n.pt --data data/coco.yaml --plot`
+`python val.py --model weights/yolo11n.pt --data data/coco.yaml --plots`
 ### trt val and fps
 1. 生成json文件，如果没有的话\
 `python utils/yolo2coco.py ----img_dir xxx --label_dir xxx --output xxx --classes xxx`

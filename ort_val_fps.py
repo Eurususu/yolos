@@ -261,6 +261,10 @@ class YOLO_ONNX_Runner:
                                     ultralytics=args.ultralytics)
 
         if dets is not None and len(dets) > 0:
+            # 打开注释可以提升验证速度
+            if len(dets) > 300:
+                # argsort()[::-1] 降序排列，取前 300
+                dets = dets[dets[:, 4].argsort()[::-1][:300]]
             final_boxes, final_scores, final_cls_inds = dets[:, :4], dets[:, 4], dets[:, 5]
             return final_boxes, final_scores, final_cls_inds
         else:
@@ -350,9 +354,13 @@ class YOLO_ONNX_Runner:
 
             if len(det_boxes) == 0:
                 continue
-
+            img_h, img_w = img.shape[:2]
             for box, score, cls_id in zip(det_boxes, det_scores, det_classes):
                 x1, y1, x2, y2 = box
+                x1 = max(0.0, float(x1))
+                y1 = max(0.0, float(y1))
+                x2 = min(float(img_w), float(x2))
+                y2 = min(float(img_h), float(y2))
                 w, h = x2 - x1, y2 - y1
                 if args.use_coco_map:
                     coco_cat_id = self.coco_id_mapping[int(cls_id)]
@@ -375,6 +383,7 @@ class YOLO_ONNX_Runner:
         # 调用 pycocotools 进行评估
         coco_dt = coco_gt.loadRes(res_json_path)
         coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
+        coco_eval.params.maxDets = [1, 10, 300] # 用于对齐ultralytics的map评估，max_dets改成300
         coco_eval.evaluate()
         coco_eval.accumulate()
         coco_eval.summarize()
